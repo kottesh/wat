@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 use colored::Colorize;
+use termimad::MadSkin;
 
 /// Braille spinner frames
 const BRAILLE_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -11,12 +12,25 @@ const BRAILLE_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦
 /// Renders agent output inline in the terminal
 pub struct InlineRenderer {
     use_colors: bool,
+    skin: MadSkin,
 }
 
 impl InlineRenderer {
     /// Create new renderer
     pub fn new(use_colors: bool) -> Self {
-        Self { use_colors }
+        let mut skin = MadSkin::default();
+        
+        if use_colors {
+            // Customize markdown rendering colors
+            skin.bold.set_fg(termimad::crossterm::style::Color::White);
+            skin.italic.set_fg(termimad::crossterm::style::Color::Cyan);
+            skin.code_block.set_fg(termimad::crossterm::style::Color::Green);
+            skin.inline_code.set_fg(termimad::crossterm::style::Color::Green);
+            skin.headers[0].set_fg(termimad::crossterm::style::Color::Yellow);
+            skin.headers[1].set_fg(termimad::crossterm::style::Color::Yellow);
+        }
+        
+        Self { use_colors, skin }
     }
     
     /// Get terminal width
@@ -62,7 +76,6 @@ impl InlineRenderer {
     /// Render thinking block with background
     pub fn render_thinking(&mut self, text: &str) -> io::Result<()> {
         let width = self.width();
-        // Dark gray background (238)
         let bg = "\x1b[48;5;238m";
         let reset = "\x1b[0m";
         
@@ -96,17 +109,23 @@ impl InlineRenderer {
     
     /// Render tool result
     pub fn render_tool_result(&mut self, result: &str) -> io::Result<()> {
-        for line in result.lines().take(10) {
+        for line in result.lines().take(50) {
             println!("  {}", line.dimmed());
         }
         println!();
         io::stdout().flush()
     }
     
-    /// Render agent response (plain white text)
+    /// Render agent response with markdown support
     pub fn render_response(&mut self, text: &str) -> io::Result<()> {
-        for line in text.lines() {
-            println!("{}", line);
+        if self.use_colors {
+            // Render markdown
+            let rendered = self.skin.text(text, Some(self.width()));
+            print!("{}", rendered);
+        } else {
+            for line in text.lines() {
+                println!("{}", line);
+            }
         }
         println!();
         io::stdout().flush()
