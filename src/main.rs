@@ -8,7 +8,6 @@ mod tools;
 
 use anyhow::{Result, Context};
 use clap::{Parser, Subcommand};
-use std::io;
 
 #[derive(Parser)]
 #[command(name = "wat")]
@@ -231,21 +230,4 @@ fn clear_history() -> Result<()> {
     }
     
     Ok(())
-}
-
-/// Handle errors gracefully
-fn handle_error(e: anyhow::Error) {
-    eprintln!("Error: {}", e);
-    
-    // Provide helpful suggestions
-    if e.to_string().contains("terminal") {
-        eprintln!("\nTry running in a proper terminal (not an IDE terminal)");
-    } else if e.to_string().contains("API") {
-        eprintln!("\nCheck your API key in ~/.config/wat/config.toml");
-        eprintln!("Or set OPENAI_API_KEY environment variable");
-    } else if e.to_string().contains("config") {
-        eprintln!("\nTry: wat config reset");
-    }
-    
-    std::process::exit(1);
 }

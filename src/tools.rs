@@ -22,7 +22,9 @@ pub fn bash(command: &str) -> Result<BashResult> {
 /// Result of a bash command
 #[derive(Debug, Clone)]
 pub struct BashResult {
+    #[allow(dead_code)]
     pub success: bool,
+    #[allow(dead_code)]
     pub exit_code: i32,
     pub stdout: String,
     pub stderr: String,

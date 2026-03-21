@@ -89,7 +89,9 @@ pub enum Hotkey {
     F2,
     F3,
     F4,
+    #[allow(dead_code)]
     CtrlAlt(char),
+    #[allow(dead_code)]
     Custom(&'static str),
 }
 
@@ -110,6 +112,7 @@ impl Hotkey {
     }
     
     /// Get string representation
+    #[allow(dead_code)]
     pub fn to_string(&self) -> String {
         match self {
             Hotkey::F2 => "F2".to_string(),

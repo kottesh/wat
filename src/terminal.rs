@@ -2,7 +2,6 @@ use std::io::{self, Write, Read};
 use std::os::fd::AsFd;
 use nix::sys::termios;
 use anyhow::{Result, Context};
-use colored::Colorize;
 
 /// Manages terminal state for inline agent mode
 pub struct TerminalState {
@@ -50,9 +49,9 @@ impl TerminalState {
         // Get terminal width
         let width = crossterm::terminal::size().map(|(w, _)| w as usize).unwrap_or(80);
         
-        // Draw blue lines
-        let line = "─".repeat(width).bright_blue();
-        print!("\r\n{}\r\n", line);
+        // Draw teal lines
+        let line = format!("\x1b[38;5;152m{}\x1b[0m", "─".repeat(width));
+        print!("{}\r\n", line);
         
         // Draw empty input line and bottom line
         print!("\r\n{}", line);
@@ -107,17 +106,20 @@ pub mod utils {
     use crossterm::terminal;
     
     /// Get terminal size
+    #[allow(dead_code)]
     pub fn terminal_size() -> Result<(u16, u16), io::Error> {
         terminal::size()
     }
     
     /// Clear from cursor to end of line
+    #[allow(dead_code)]
     pub fn clear_to_end_of_line() -> io::Result<()> {
         print!("\x1b[0K");
         io::stdout().flush()
     }
     
     /// Move cursor up N lines
+    #[allow(dead_code)]
     pub fn cursor_up(n: u16) -> io::Result<()> {
         if n > 0 {
             print!("\x1b[{}A", n);
@@ -128,6 +130,7 @@ pub mod utils {
     }
     
     /// Move cursor down N lines
+    #[allow(dead_code)]
     pub fn cursor_down(n: u16) -> io::Result<()> {
         if n > 0 {
             print!("\x1b[{}B", n);
@@ -138,6 +141,7 @@ pub mod utils {
     }
     
     /// Move cursor to specific position (1-indexed)
+    #[allow(dead_code)]
     pub fn cursor_to(row: u16, col: u16) -> io::Result<()> {
         print!("\x1b[{};{}H", row, col);
         io::stdout().flush()

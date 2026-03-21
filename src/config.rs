@@ -33,6 +33,7 @@ pub enum LlmProvider {
 }
 
 impl LlmProvider {
+    #[allow(dead_code)]
     pub fn from_str(s: &str) -> Result<Self> {
         match s.to_lowercase().as_str() {
             "openai" => Ok(LlmProvider::OpenAI),
@@ -43,6 +44,7 @@ impl LlmProvider {
         }
     }
     
+    #[allow(dead_code)]
     pub fn to_string(&self) -> String {
         match self {
             LlmProvider::OpenAI => "openai".to_string(),
@@ -205,6 +207,7 @@ impl Config {
     }
     
     /// Get sessions directory path
+    #[allow(dead_code)]
     pub fn sessions_dir() -> Result<PathBuf> {
         let dir = Self::data_dir()?.join("sessions");
         std::fs::create_dir_all(&dir)?;

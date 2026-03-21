@@ -28,6 +28,7 @@ pub struct Message {
 #[derive(Debug, Deserialize)]
 struct LlmResponse {
     choices: Vec<Choice>,
+    #[allow(dead_code)]
     usage: Option<Usage>,
 }
 
@@ -35,14 +36,18 @@ struct LlmResponse {
 #[derive(Debug, Deserialize)]
 struct Choice {
     message: Message,
+    #[allow(dead_code)]
     finish_reason: String,
 }
 
 /// Token usage
 #[derive(Debug, Deserialize)]
 struct Usage {
+    #[allow(dead_code)]
     prompt_tokens: u32,
+    #[allow(dead_code)]
     completion_tokens: u32,
+    #[allow(dead_code)]
     total_tokens: u32,
 }
 
@@ -152,7 +157,6 @@ impl LlmClient {
                 .into_iter()
                 .filter_map(|c| match c {
                     AnthropicContentResponse::Text { text } => Some(text),
-                    _ => None,
                 })
                 .collect::<Vec<String>>()
                 .join("\n"),
