@@ -3,7 +3,7 @@ use crate::{
     terminal::TerminalState,
     render::InlineRenderer,
     llm::{LlmClient, Message},
-    tools::{bash, parse_bash_commands, is_dangerous},
+    tools::{self, Tool, execute_tool, is_dangerous},
     config::Config,
 };
 
@@ -96,50 +96,62 @@ impl Agent {
             
             let response = response?;
             
-            // Parse for bash commands
-            let commands = parse_bash_commands(&response.content);
+            // Parse for tools
+            let tools = tools::parse_tools(&response.content);
             
-            if commands.is_empty() {
-                // No commands - show response and done
+            if tools.is_empty() {
+                // No tools - show response and done
                 self.history.push(Message::assistant(&response.content));
                 self.renderer.render_response(&response.content)?;
                 break;
             }
             
-            // Show the response (which contains the command)
-            self.renderer.render_response(&response.content)?;
+            // Show the response without the tool code blocks (those render separately)
+            let display_response = tools::strip_tool_blocks(&response.content);
+            if !display_response.is_empty() {
+                self.renderer.render_response(&display_response)?;
+            }
             self.history.push(Message::assistant(&response.content));
             
-            // Execute commands
+            // Execute tools
             let mut all_results = String::new();
             
-            for cmd in &commands {
-                // Check for dangerous commands
-                if is_dangerous(cmd) {
-                    self.renderer.render_error(&format!("Refusing dangerous command: {}", cmd))?;
-                    all_results.push_str(&format!("Command refused (dangerous): {}\n", cmd));
-                    continue;
+            for tool in &tools {
+                match tool {
+                    Tool::Bash { command } => {
+                        // Check for dangerous commands
+                        if is_dangerous(command) {
+                            self.renderer.render_error(&format!("Refusing dangerous command: {}", command))?;
+                            all_results.push_str(&format!("Command refused (dangerous): {}\n", command));
+                            continue;
+                        }
+                        
+                        // Execute with timing
+                        let result = execute_tool(tool)?;
+                        
+                        // Show result with timing, success status, and command (renders header with result)
+                        self.renderer.render_tool_result_with_timing(&result.output, Some(result.duration_secs), Some("bash"), result.success, Some(command))?;
+                        
+                        all_results.push_str(&format!("$ {}\n{}\n", command, result.output));
+                    }
+                    Tool::ReadFile { path } => {
+                        // Show what we're reading
+                        self.renderer.render_tool_call("read_file", path)?;
+                        
+                        // Execute
+                        let result = execute_tool(tool)?;
+                        
+                        // Show result with timing
+                        self.renderer.render_tool_result_with_timing(&result.output, Some(result.duration_secs), Some("read_file"), result.success, None)?;
+                        
+                        all_results.push_str(&format!("File: {}\n{}\n", path, result.output));
+                    }
                 }
-                
-                // Show what we're running
-                self.renderer.render_tool_call("bash", cmd)?;
-                
-                // Execute with timing
-                let start_time = std::time::Instant::now();
-                let result = bash(cmd)?;
-                let duration = start_time.elapsed().as_secs_f64();
-                
-                let output = result.output_truncated(50);
-                
-                // Show result with timing
-                self.renderer.render_tool_result_with_timing(&output, Some(duration))?;
-                
-                all_results.push_str(&format!("$ {}\n{}\n", cmd, output));
             }
             
             // Add results to history for next iteration
             if !all_results.is_empty() {
-                self.history.push(Message::user(&format!("Command output:\n{}", all_results)));
+                self.history.push(Message::user(&format!("Tool output:\n{}", all_results)));
             }
         }
         
@@ -156,33 +168,12 @@ impl Agent {
             // Clear screen and re-render entire conversation
             print!("\x1b[2J\x1b[H"); // Clear screen and move to top
             
-            // Re-render conversation history
-            let mut user_messages = Vec::new();
-            let mut assistant_messages = Vec::new();
-            
-            for (i, msg) in self.history.iter().enumerate() {
+            // Re-render conversation history in chronological order
+            for msg in &self.history {
                 if msg.role == "user" {
-                    user_messages.push((i, &msg.content));
+                    self.renderer.render_user_input(&msg.content)?;
                 } else if msg.role == "assistant" {
-                    assistant_messages.push((i, &msg.content));
-                }
-            }
-            
-            // Re-render in chronological order
-            let mut user_idx = 0;
-            let mut assistant_idx = 0;
-            
-            for (i, msg) in self.history.iter().enumerate() {
-                if msg.role == "user" {
-                    if user_idx < user_messages.len() && user_messages[user_idx].0 == i {
-                        self.renderer.render_user_input(&msg.content)?;
-                        user_idx += 1;
-                    }
-                } else if msg.role == "assistant" {
-                    if assistant_idx < assistant_messages.len() && assistant_messages[assistant_idx].0 == i {
-                        self.renderer.render_response(&msg.content)?;
-                        assistant_idx += 1;
-                    }
+                    self.renderer.render_response(&msg.content)?;
                 }
             }
         }
@@ -200,10 +191,11 @@ impl Agent {
 
 Tools:
 - bash: Execute shell commands. Put commands in ```bash code blocks.
+- read_file: Read file contents. Put the file path in a ```read_file code block. Shows line numbers.
 
 Current directory: {}
 
-When asked to do something, run the appropriate command. Show the command you're running."#, cwd)
+When asked to do something, use the appropriate tool. Show the tool call you're making."#, cwd)
     }
 }
 

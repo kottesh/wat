@@ -85,13 +85,13 @@ impl InlineRenderer {
             let reset = "\x1b[0m";
             
             // Add padding line
-            let empty_line = format!("{:<width$}", "", width = width);
+            let empty_line = " ".repeat(width);
             println!("{}{}{}", bg, empty_line, reset);
             
             // Add user input with padding
-            let padded_input = format!("  {}  ", input);
-            let full_line = format!("{:<width$}", padded_input, width = width);
-            println!("{}{}{}", bg, full_line.white(), reset);
+            let visible = format!("  {}  ", input);
+            let padding = width.saturating_sub(visible.len());
+            println!("{}{}{}{}", bg, visible, " ".repeat(padding), reset);
             
             // Add padding line
             println!("{}{}{}", bg, empty_line, reset);
@@ -114,9 +114,9 @@ impl InlineRenderer {
         let reset = "\x1b[0m";
         
         for line in text.lines() {
-            let padded = format!("{:<width$}", line, width = width);
+            let padding = width.saturating_sub(line.len());
             if self.use_colors {
-                println!("{}{}{}", bg, padded.dimmed(), reset);
+                println!("{}{}{}{}", bg, line, " ".repeat(padding), reset);
             } else {
                 println!("{}", line);
             }
@@ -125,36 +125,53 @@ impl InlineRenderer {
         io::stdout().flush()
     }
     
-    /// Render tool call as command with $ prefix and background
+    /// Render tool call
     pub fn render_tool_call(&mut self, tool: &str, args: &str) -> io::Result<()> {
         let width = self.width();
         
         if tool == "bash" {
+            // Don't render anything for bash - will be rendered with result
+            // so we can apply success/failure color to the whole block
+        } else if tool == "read_file" {
+            // read_file tool - just the header, background continues into result
             if self.use_colors {
-                // Light teal background for tool calls (152 = closest to #8ABEB7)
-                let bg = "\x1b[48;5;152m";
+                // Very subtle gray background (235 = ~5% opacity gray)
+                let bg = "\x1b[48;5;235m";
                 let reset = "\x1b[0m";
+                let bold = "\x1b[1m";
+                let no_bold = "\x1b[22m"; // Reset bold only, keep other attributes
                 
-                // Show as terminal command with background
-                let command = format!(" {} {}", "$".green().bold(), args.black());
-                let full_line = format!("{:<width$}", command, width = width);
-                println!("{}{}{}", bg, full_line, reset);
+                // Full width empty line for top padding
+                let empty_line = " ".repeat(width);
+                println!("{}{}{}", bg, empty_line, reset);
+                
+                // "Read" in bold, then filename - use manual codes to avoid reset from colored crate
+                // Visual text is "  Read filename" (2 + 4 + 1 + filename_len)
+                let visible_text = format!("  Read {}", args);
+                let padding = width.saturating_sub(visible_text.len());
+                
+                // Print with bold on "Read"
+                print!("{}", bg);
+                print!("  {}Read{}", bold, no_bold);
+                print!(" {}", args);
+                print!("{}", " ".repeat(padding));
+                println!("{}", reset);
             } else {
-                println!(" $ {}", args);
+                println!();
+                println!("  Read {}", args);
             }
-            println!();
         } else {
-            // Other tools (if any)
+            // Other tools - subtle gray background
             if self.use_colors {
-                let bg = "\x1b[48;5;152m";
+                let bg = "\x1b[48;5;235m";
                 let reset = "\x1b[0m";
                 let content = format!(" {} {}", tool, args);
-                let full_line = format!("{:<width$}", content, width = width);
-                println!("{}{}{}", bg, full_line, reset);
+                print!("{}{}{}", bg, content, reset);
             } else {
-                println!(" {} {}", tool, args);
+                print!(" {} {}", tool, args);
             }
             println!();
+            println!(); // Extra spacing
         }
         io::stdout().flush()
     }
@@ -162,52 +179,133 @@ impl InlineRenderer {
     /// Render tool result with truncation and timing
     #[allow(dead_code)]
     pub fn render_tool_result(&mut self, result: &str) -> io::Result<()> {
-        self.render_tool_result_with_timing(result, None)
+        self.render_tool_result_with_timing(result, None, None, true, None)
     }
     
-    /// Render tool result with optional timing
-    pub fn render_tool_result_with_timing(&mut self, result: &str, duration: Option<f64>) -> io::Result<()> {
+    /// Render tool result with optional timing, tool type, and success status for styling
+    pub fn render_tool_result_with_timing(&mut self, result: &str, duration: Option<f64>, tool: Option<&str>, success: bool, command: Option<&str>) -> io::Result<()> {
+        let width = self.width();
         let lines: Vec<&str> = result.lines().collect();
         let max_lines = 50;
         
-        if lines.len() > max_lines {
-            // Show truncation message
-            let hidden_count = lines.len() - max_lines;
-            if self.use_colors {
-                println!(" {} ({} earlier lines, ctrl+o to expand)", 
-                    "...".dimmed(), 
-                    hidden_count.to_string().dimmed()
-                );
+        // Check if this is a read_file result - needs continuous background
+        let is_read_file = tool == Some("read_file");
+        let is_bash = tool == Some("bash");
+        
+        if is_read_file && self.use_colors {
+            let bg = "\x1b[48;5;235m";
+            let reset = "\x1b[0m";
+            
+            // Empty line separator between header and content
+            let empty_line = " ".repeat(width);
+            println!("{}{}{}", bg, empty_line, reset);
+            
+            // Show content with background
+            if lines.len() > max_lines {
+                for line in &lines[lines.len()-max_lines..] {
+                    let visible = format!("  {}", line);
+                    let padding = width.saturating_sub(visible.len());
+                    println!("{}{}{}{}", bg, visible, " ".repeat(padding), reset);
+                }
             } else {
-                println!(" ... ({} earlier lines, ctrl+o to expand)", hidden_count);
+                for line in &lines {
+                    let visible = format!("  {}", line);
+                    let padding = width.saturating_sub(visible.len());
+                    println!("{}{}{}{}", bg, visible, " ".repeat(padding), reset);
+                }
             }
             
-            // Show last max_lines
-            for line in &lines[lines.len()-max_lines..] {
+            // Empty line at bottom
+            println!("{}{}{}", bg, empty_line, reset);
+            
+            // Show timing if provided
+            if let Some(duration) = duration {
                 if self.use_colors {
-                    println!(" {}", line.dimmed());
+                    println!(" {} {:.1}s", "Took".dimmed(), duration);
                 } else {
-                    println!(" {}", line);
+                    println!(" Took {:.1}s", duration);
                 }
             }
-        } else {
-            // Show all lines
-            for line in &lines {
-                if self.use_colors {
-                    println!(" {}", line.dimmed());
-                } else {
-                    println!(" {}", line);
-                }
+        } else if is_bash && self.use_colors {
+            // Bash result with success/failure background hint
+            // Base colors: #283228 (green), #CC6666 (red)
+            // Blended with slightly higher visibility
+            let bg = if success { "\x1b[48;2;30;38;30m" } else { "\x1b[48;2;60;30;30m" };
+            let reset = "\x1b[0m";
+            let bold = "\x1b[1m";
+            let no_bold = "\x1b[22m";
+            
+            // Empty line at top
+            let empty_line = " ".repeat(width);
+            println!("{}{}{}", bg, empty_line, reset);
+            
+            // Show command header with $ prefix (bold command)
+            if let Some(cmd) = command {
+                let header = format!("  $ {}", cmd);
+                let padding = width.saturating_sub(header.len());
+                println!("{}  $ {}{}{}{}", bg, bold, cmd, no_bold, " ".repeat(padding));
+                print!("{}", reset);
+                // Empty line after command
+                println!("{}{}{}", bg, empty_line, reset);
             }
-        }
-        
-        // Show timing if provided
-        if let Some(duration) = duration {
-            println!();
-            if self.use_colors {
-                println!(" {} {:.1}s", "Took".dimmed(), duration);
+            
+            // Show content with background (with left/right padding)
+            if lines.len() > max_lines {
+                for line in &lines[lines.len()-max_lines..] {
+                    let visible = format!("  {}  ", line);
+                    let padding = width.saturating_sub(visible.len());
+                    println!("{}{}{}{}", bg, visible, " ".repeat(padding), reset);
+                }
             } else {
-                println!(" Took {:.1}s", duration);
+                for line in &lines {
+                    let visible = format!("  {}  ", line);
+                    let padding = width.saturating_sub(visible.len());
+                    println!("{}{}{}{}", bg, visible, " ".repeat(padding), reset);
+                }
+            }
+            
+            // Empty line before timing
+            if duration.is_some() {
+                println!("{}{}{}", bg, empty_line, reset);
+            }
+            
+            // Show timing if provided (with left/right padding)
+            if let Some(duration) = duration {
+                let timing_text = format!("  {:.1}s  ", duration);
+                let padding = width.saturating_sub(timing_text.len());
+                println!("{}{}{}{}", bg, timing_text, " ".repeat(padding), reset);
+            }
+            
+            // Empty line at bottom
+            println!("{}{}{}", bg, empty_line, reset);
+        } else {
+            // Regular result rendering (no colors or other tools)
+            if lines.len() > max_lines {
+                for line in &lines[lines.len()-max_lines..] {
+                    if self.use_colors {
+                        println!("{}", line.dimmed());
+                    } else {
+                        println!("{}", line);
+                    }
+                }
+            } else {
+                for line in &lines {
+                    if self.use_colors {
+                        println!("{}", line.dimmed());
+                    } else {
+                        println!("{}", line);
+                    }
+                }
+            }
+            
+            // Show timing if provided
+            if let Some(duration) = duration {
+                println!();
+                if self.use_colors {
+                    println!(" {} {:.1}s", "Took".dimmed(), duration);
+                } else {
+                    println!(" Took {:.1}s", duration);
+                }
             }
         }
         
