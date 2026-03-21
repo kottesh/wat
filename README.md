@@ -74,34 +74,6 @@ export ZHIPUAI_API_KEY="your-key"
 wat run
 ```
 
-### UI
-
-```
-────────────────────────────────────────────────── (blue line)
-list files in current directory
-────────────────────────────────────────────────── (blue line)
-
-list files in current directory
-
-⠋ Thinking...
-
-I'll list the files.
-
-```bash
-ls -la
-```
-
-bash: ls -la
-  total 24
-  drwxr-xr-x  5 user user 4096 Mar 21 10:00 .
-  -rw-r--r--  1 user user  256 Mar 21 10:00 Cargo.toml
-  ...
-
-────────────────────────────────────────────────── (blue line)
-(next input)
-────────────────────────────────────────────────── (blue line)
-```
-
 ### Commands
 
 - Type your request and press Enter
