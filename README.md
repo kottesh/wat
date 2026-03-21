@@ -1,48 +1,24 @@
 # WAT - Well Assisted Terminal
 
-An inline terminal assistant that appears at your command line when you need help.
+An inline terminal assistant with an agentic loop. Type your request, and it executes commands to help you.
 
 ## Features
 
-- **Inline interface**: Appears at the command line, not as an overlay
-- **Context-aware**: Knows your current directory, git status, shell history
-- **Safe execution**: Warns before dangerous commands
-- **Multi-LLM support**: OpenAI, Anthropic, local models
-- **Tool calling**: Can execute commands, read files, search
-- **Session persistence**: Remembers conversation history
+- **Inline UI** - Appears at your command line with a clean input box
+- **Agentic loop** - Automatically executes bash commands and continues until done
+- **Bash tool** - Runs shell commands in ```bash blocks
+- **Safe execution** - Refuses dangerous commands (rm -rf /, etc.)
+- **Multi-LLM support** - OpenAI, Anthropic, ZhipuAI, or any OpenAI-compatible API
 
 ## Installation
 
-### From source
 ```bash
-git clone https://github.com/yourusername/wat
+git clone https://github.com/kottesh/wat
 cd wat
-cargo install --path .
+cargo build --release
 ```
 
-### Shell integration
-```bash
-wat install
-```
-
-## Usage
-
-### Interactive mode
-```bash
-# Start the agent daemon
-wat daemon
-
-# Press F2 in any terminal to summon the agent
-```
-
-### One-off mode
-```bash
-# Run agent once
-wat run
-
-# Direct query
-wat query "find large files in current directory"
-```
+Binary will be at `target/release/wat`
 
 ## Configuration
 
@@ -50,46 +26,97 @@ Create `~/.config/wat/config.toml`:
 
 ```toml
 [llm]
-provider = "openai"  # openai, anthropic, local
-model = "gpt-4"
-api_key = "${OPENAI_API_KEY}"
-
-[hotkey]
-key = "F2"  # F2, Ctrl+Alt+;, etc.
+provider = "Custom"
+model = "glm-4-flash"
+api_key = "${ZHIPUAI_API_KEY}"
+base_url = "https://open.bigmodel.cn/api/paas/v4/chat/completions"
+temperature = 0.3
+max_tokens = 2000
 
 [ui]
-theme = "dark"
-prompt = "🤖 > "
+use_colors = true
 ```
+
+### Providers
+
+**OpenAI:**
+```toml
+[llm]
+provider = "OpenAI"
+model = "gpt-4"
+api_key = "${OPENAI_API_KEY}"
+```
+
+**Anthropic:**
+```toml
+[llm]
+provider = "Anthropic"
+model = "claude-3-sonnet-20240229"
+api_key = "${ANTHROPIC_API_KEY}"
+```
+
+**Custom (OpenAI-compatible):**
+```toml
+[llm]
+provider = "Custom"
+model = "your-model"
+api_key = "${YOUR_API_KEY}"
+base_url = "https://your-api.com/v1/chat/completions"
+```
+
+## Usage
+
+```bash
+# Set your API key
+export ZHIPUAI_API_KEY="your-key"
+
+# Run the agent
+wat run
+```
+
+### UI
+
+```
+────────────────────────────────────────────────── (blue line)
+list files in current directory
+────────────────────────────────────────────────── (blue line)
+
+list files in current directory
+
+⠋ Thinking...
+
+I'll list the files.
+
+```bash
+ls -la
+```
+
+bash: ls -la
+  total 24
+  drwxr-xr-x  5 user user 4096 Mar 21 10:00 .
+  -rw-r--r--  1 user user  256 Mar 21 10:00 Cargo.toml
+  ...
+
+────────────────────────────────────────────────── (blue line)
+(next input)
+────────────────────────────────────────────────── (blue line)
+```
+
+### Commands
+
+- Type your request and press Enter
+- `clear` - Clear conversation history
+- `exit`, `quit`, `q`, or Ctrl+C - Exit
 
 ## How it works
 
-1. **Hotkey pressed** (F2 by default)
-2. **Agent takes over** the command line
-3. **You type your query** inline
-4. **Agent thinks** and shows progress
-5. **Tools are called** (commands executed)
-6. **Results shown** inline
-7. **Returns to shell** when done
-
-## Example
-
-```
-$ ls
-file1.txt file2.txt
-
-[Press F2]
-🤖 > find files modified today
-
-🤔 Thinking...
-  • Looking for files modified within 24h
-🔧 Running: find . -type f -mtime 0
-  📋 ./file1.txt
-💡 Found 1 file modified today
-
-$  # Back to normal shell
-```
+1. You type a request
+2. LLM responds, optionally with ```bash blocks
+3. Bash commands are automatically executed
+4. Output is shown and fed back to the LLM
+5. Loop continues until LLM responds without commands
+6. Ready for next input
 
 ## License
 
-MIT OR Apache-2.0
+MIT
