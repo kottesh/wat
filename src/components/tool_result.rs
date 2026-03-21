@@ -84,9 +84,17 @@ impl Component for ToolResultComponent {
         let bg_color = if self.state.use_colors {
             if self.is_bash() {
                 if self.state.success {
-                    Color::Rgb { r: 30, g: 38, b: 30 } // Dark green tint
+                    Color::Rgb {
+                        r: 30,
+                        g: 38,
+                        b: 30,
+                    } // Dark green tint
                 } else {
-                    Color::Rgb { r: 60, g: 30, b: 30 } // Dark red tint
+                    Color::Rgb {
+                        r: 60,
+                        g: 30,
+                        b: 30,
+                    } // Dark red tint
                 }
             } else if self.is_read_file() {
                 Color::Ansi(235)
@@ -97,76 +105,89 @@ impl Component for ToolResultComponent {
             Color::Default
         };
 
-        // Calculate height
-        let mut height = display_lines.len();
+        // Calculate height: top pad + content rows + bottom pad
+        let mut content_rows = 0u16;
 
         if self.is_bash() {
-            // Top padding + command header + empty line + output + timing lines + bottom padding
-            height += 2; // Top padding + command line
             if self.state.command.is_some() {
-                height += 1; // Empty line after command
+                content_rows += 1; // command
             }
-            if self.state.duration_secs.is_some() {
-                height += 2; // Empty line + timing
-            }
-            height += 1; // Bottom padding
+            content_rows += display_lines.len() as u16; // output
+            content_rows += 1; // took Xs
         } else if self.is_read_file() {
-            // Empty line + output + bottom padding + timing
-            height += 2; // Empty line after header + bottom padding
+            content_rows += 1; // empty line after header
+            content_rows += display_lines.len() as u16;
             if self.state.duration_secs.is_some() {
-                height += 1; // Timing line
+                content_rows += 1;
             }
         } else {
+            content_rows += display_lines.len() as u16;
             if self.state.duration_secs.is_some() {
-                height += 2; // Empty line + timing
+                content_rows += 1;
             }
         }
 
-        if height == 0 {
-            height = 1;
-        }
+        let height = std::cmp::max(content_rows + 2, 1); // +2 for top + bottom padding, min 1
 
         let mut buffer = Buffer::new(width, height as u16);
         let mut current_row = 0u16;
 
-        if self.is_bash() && self.state.use_colors {
-            // === Bash result rendering ===
-            
-            // Top padding
-            buffer.fill_row(current_row, bg_color);
-            current_row += 1;
+        // Top padding
+        buffer.fill_row(current_row, bg_color);
+        current_row += 1;
 
-            // Command line with $ prefix (bold command)
+        if self.is_bash() && self.state.use_colors {
+            // === Bash: top pad | $ command | output... | took Xs | bottom pad ===
+
+            // Command line
             if let Some(ref cmd) = self.state.command {
                 buffer.fill_row(current_row, bg_color);
-                buffer.write_str(current_row, 0, "  $ ", Color::Default, bg_color, Modifiers::default());
-                buffer.write_str(current_row, 4, cmd, Color::Default, bg_color, Modifiers::bold());
-                current_row += 1;
-
-                // Empty line after command
-                buffer.fill_row(current_row, bg_color);
+                buffer.write_str(
+                    current_row,
+                    0,
+                    "  $ ",
+                    Color::Default,
+                    bg_color,
+                    Modifiers::default(),
+                );
+                buffer.write_str(
+                    current_row,
+                    4,
+                    cmd,
+                    Color::Default,
+                    bg_color,
+                    Modifiers::bold(),
+                );
                 current_row += 1;
             }
 
-            // Output lines with padding
+            // Output lines
             for line in &display_lines {
                 buffer.fill_row(current_row, bg_color);
-                let text = format!("  {}  ", line);
-                buffer.write_str(current_row, 0, &text, Color::Default, bg_color, Modifiers::default());
-                current_row += 1;
-            }
-
-            // Empty line before timing
-            if self.state.duration_secs.is_some() {
-                buffer.fill_row(current_row, bg_color);
+                let text = format!("  {}", line);
+                buffer.write_str(
+                    current_row,
+                    0,
+                    &text,
+                    Color::Default,
+                    bg_color,
+                    Modifiers::default(),
+                );
                 current_row += 1;
             }
 
             // Timing
             if let Some(duration) = self.state.duration_secs {
                 buffer.fill_row(current_row, bg_color);
-                let timing_text = format!("  {:.1}s  ", duration);
-                buffer.write_str(current_row, 0, &timing_text, Color::Default, bg_color, Modifiers::default());
+                let timing_text = format!("Took {:.1}s", duration);
+                buffer.write_str(
+                    current_row,
+                    0,
+                    &timing_text,
+                    Color::Default,
+                    bg_color,
+                    Modifiers::default(),
+                );
                 current_row += 1;
             }
 
@@ -176,7 +197,7 @@ impl Component for ToolResultComponent {
             }
         } else if self.is_read_file() && self.state.use_colors {
             // === Read file result rendering ===
-            
+
             // Empty line after header (from ToolCallComponent)
             buffer.fill_row(current_row, bg_color);
             current_row += 1;
@@ -185,7 +206,14 @@ impl Component for ToolResultComponent {
             for line in &display_lines {
                 buffer.fill_row(current_row, bg_color);
                 let text = format!("  {}", line);
-                buffer.write_str(current_row, 0, &text, Color::Default, bg_color, Modifiers::default());
+                buffer.write_str(
+                    current_row,
+                    0,
+                    &text,
+                    Color::Default,
+                    bg_color,
+                    Modifiers::default(),
+                );
                 current_row += 1;
             }
 
@@ -197,7 +225,14 @@ impl Component for ToolResultComponent {
             if let Some(duration) = self.state.duration_secs {
                 let timing_text = format!(" Took {:.1}s", duration);
                 if current_row < height as u16 {
-                    buffer.write_str(current_row, 0, &timing_text, Color::Ansi(8), Color::Default, Modifiers::dim());
+                    buffer.write_str(
+                        current_row,
+                        0,
+                        &timing_text,
+                        Color::Ansi(8),
+                        Color::Default,
+                        Modifiers::dim(),
+                    );
                 }
             }
         } else {
@@ -218,9 +253,20 @@ impl Component for ToolResultComponent {
                 current_row += 1; // Empty line
                 let timing_text = format!(" Took {:.1}s", duration);
                 if current_row < height as u16 {
-                    buffer.write_str(current_row, 0, &timing_text, fg, Color::Default, Modifiers::default());
+                    buffer.write_str(
+                        current_row,
+                        0,
+                        &timing_text,
+                        fg,
+                        Color::Default,
+                        Modifiers::default(),
+                    );
+                    current_row += 1;
                 }
             }
+
+            // Bottom padding
+            buffer.fill_row(current_row, bg_color);
         }
 
         buffer
@@ -232,27 +278,28 @@ impl Component for ToolResultComponent {
         }
 
         let display_lines = self.get_display_lines();
-        let mut height = display_lines.len();
+        let mut content_rows = 0u16;
 
         if self.is_bash() {
-            height += 2;
             if self.state.command.is_some() {
-                height += 1;
+                content_rows += 1;
             }
-            if self.state.duration_secs.is_some() {
-                height += 2;
-            }
-            height += 1;
+            content_rows += display_lines.len() as u16;
+            content_rows += 1; // took Xs
         } else if self.is_read_file() {
-            height += 2;
+            content_rows += 1;
+            content_rows += display_lines.len() as u16;
             if self.state.duration_secs.is_some() {
-                height += 1;
+                content_rows += 1;
             }
-        } else if self.state.duration_secs.is_some() {
-            height += 2;
+        } else {
+            content_rows += display_lines.len() as u16;
+            if self.state.duration_secs.is_some() {
+                content_rows += 1;
+            }
         }
 
-        height as u16
+        content_rows + 2 // top + bottom padding
     }
 
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any {

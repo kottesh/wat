@@ -3,15 +3,12 @@
 //! This module implements a component-based inline renderer that outputs
 //! directly to the terminal, similar to the original inline style.
 
-use std::io::{self, Write};
 use std::collections::HashMap;
-use std::any::Any;
+use std::io::{self, Write};
 
 use crate::component::{Buffer, Component, ComponentId, Size, format_cell_style};
 use crate::components::{
-    ErrorComponent, PromptComponent, ResponseComponent, SeparatorComponent,
-    SpinnerComponent, ToolCallComponent, ToolResultComponent,
-    UserInputComponent,
+    ErrorComponent, ResponseComponent, ToolCallComponent, ToolResultComponent, UserInputComponent,
 };
 use crate::layout::LayoutManager;
 
@@ -38,8 +35,6 @@ pub struct DifferentialRenderer {
     terminal_size: Size,
     /// Whether colors are enabled
     use_colors: bool,
-    /// Current prompt component (if any)
-    prompt_id: Option<ComponentId>,
 }
 
 impl std::fmt::Debug for DifferentialRenderer {
@@ -64,7 +59,6 @@ impl DifferentialRenderer {
             layout: LayoutManager::new(terminal_size.width, terminal_size.height),
             terminal_size,
             use_colors,
-            prompt_id: None,
         }
     }
 
@@ -127,15 +121,6 @@ impl DifferentialRenderer {
         id
     }
 
-    /// Add a spinner component
-    pub fn add_spinner(&mut self, message: String) -> ComponentId {
-        let id = next_component_id();
-        let component = SpinnerComponent::new(id, message, self.use_colors);
-        let id = self.add_component(Box::new(component));
-        self.render_component(id);
-        id
-    }
-
     /// Add an error component
     pub fn add_error(&mut self, message: String) -> ComponentId {
         let id = next_component_id();
@@ -145,43 +130,85 @@ impl DifferentialRenderer {
         id
     }
 
-    /// Add a separator component
-    pub fn add_separator(&mut self) -> ComponentId {
-        let id = next_component_id();
-        let component = SeparatorComponent::new(id, self.use_colors);
-        let id = self.add_component(Box::new(component));
-        self.render_component(id);
-        id
-    }
+    // ── Bash streaming methods ──────────────────────────────────────────
 
-    /// Create a prompt component
-    pub fn create_prompt(&mut self) -> ComponentId {
-        // Remove existing prompt if any
-        if let Some(old_id) = self.prompt_id.take() {
-            self.remove_component(old_id);
+    /// Print the bash block: top pad + command + gap.
+    pub fn print_bash_header(&self, command: &str) {
+        if self.use_colors {
+            let width = self.terminal_size.width as usize;
+            let bg = "\x1b[48;2;30;38;30m";
+            let reset = "\x1b[0m";
+            let bold = "\x1b[1m";
+            let empty = " ".repeat(width);
+            // Top padding
+            print!("{}{}{}\r\n", bg, empty, reset);
+            // Command line — bg covers entire row including padding
+            let content = format!("  $ {}", command);
+            let padding = " ".repeat(width.saturating_sub(content.len()));
+            print!("{}{}{}{}{}{}\r\n", bg, bold, content, padding, bold, reset);
+            // Gap between command and output
+            print!("{}{}{}\r\n", bg, empty, reset);
+        } else {
+            println!();
+            println!("  $ {}", command);
+            println!();
         }
-
-        let id = next_component_id();
-        let component = PromptComponent::new(id, self.use_colors);
-        let id = self.add_component(Box::new(component));
-        self.prompt_id = Some(id);
-        id
+        let _ = io::stdout().flush();
     }
 
-    /// Get the prompt component for input handling
-    pub fn get_prompt_mut(&mut self) -> Option<&mut PromptComponent> {
-        let id = self.prompt_id?;
-        self.components.get_mut(&id).and_then(|entry| {
-            entry.component.as_any_mut().downcast_mut::<PromptComponent>()
-        })
-    }
-
-    /// Clear the prompt
-    pub fn clear_prompt(&mut self) {
-        if let Some(id) = self.prompt_id.take() {
-            self.remove_component(id);
+    /// Print a single line of command output.
+    pub fn print_output_line(&self, line: &str) {
+        if self.use_colors {
+            let width = self.terminal_size.width as usize;
+            let bg = "\x1b[48;2;30;38;30m";
+            let reset = "\x1b[0m";
+            let content = format!("  {}", line);
+            let padding = " ".repeat(width.saturating_sub(content.len()));
+            // Entire line gets bg — content + padding, reset only at end
+            print!("{}{}{}{}\r\n", bg, content, padding, reset);
+        } else {
+            println!("  {}", line);
         }
+        let _ = io::stdout().flush();
     }
+
+    /// Clear the current timer line so output can take its place.
+    pub fn clear_timer_line(&self) {
+        print!("\r\x1b[2K");
+        let _ = io::stdout().flush();
+    }
+
+    /// Finalize: gap row + took X.Xs + bottom padding.
+    /// The caller must have already cleared any previous timer line.
+    pub fn print_bash_footer(&self, duration_secs: f64, success: bool) {
+        if self.use_colors {
+            let width = self.terminal_size.width as usize;
+            let bg = if success {
+                "\x1b[48;2;30;38;30m"
+            } else {
+                "\x1b[48;2;60;30;30m"
+            };
+            let reset = "\x1b[0m";
+            let empty = " ".repeat(width);
+            // Gap between output and timer
+            print!("{}{}{}\r\n", bg, empty, reset);
+            // Timer row
+            let content = format!("  Took {:.1}s", duration_secs);
+            let padding = " ".repeat(width.saturating_sub(content.len()));
+            print!("{}{}{}{}\r\n", bg, content, padding, reset);
+            // Bottom padding
+            print!("{}{}{}\r\n", bg, empty, reset);
+        } else {
+            println!();
+            println!("  Took {:.1}s", duration_secs);
+            println!();
+        }
+        // Blank line after the block (global spacing rule)
+        println!();
+        let _ = io::stdout().flush();
+    }
+
+    // ── Private helpers ─────────────────────────────────────────────────
 
     /// Add a generic component
     fn add_component(&mut self, component: Box<dyn Component>) -> ComponentId {
@@ -189,15 +216,6 @@ impl DifferentialRenderer {
         self.layout.append_component(id);
         self.components.insert(id, ComponentEntry { component });
         id
-    }
-
-    /// Remove a component
-    pub fn remove_component(&mut self, id: ComponentId) {
-        self.components.remove(&id);
-        self.layout.remove_component(id);
-        if self.prompt_id == Some(id) {
-            self.prompt_id = None;
-        }
     }
 
     /// Render a single component to stdout
@@ -217,15 +235,13 @@ impl DifferentialRenderer {
         let mut output = String::new();
 
         for row in &buffer.cells {
-            // Group consecutive cells with the same style
             let mut current_style: Option<String> = None;
             let mut current_chars = String::new();
 
             for cell in row {
                 let style = format_cell_style(&cell.fg, &cell.bg, &cell.modifiers);
-                
+
                 if current_style.as_ref() != Some(&style) {
-                    // Style changed - flush current chars and start new group
                     if !current_chars.is_empty() {
                         if let Some(ref s) = current_style {
                             output.push_str(s);
@@ -238,37 +254,17 @@ impl DifferentialRenderer {
                 current_chars.push(cell.char);
             }
 
-            // Flush remaining chars
             if !current_chars.is_empty() {
                 if let Some(ref s) = current_style {
                     output.push_str(s);
                 }
                 output.push_str(&current_chars);
             }
-            
-            output.push_str("\x1b[0m\r\n"); // Reset and newline WITH carriage return
+
+            output.push_str("\x1b[0m\r\n");
         }
 
         output
-    }
-
-    /// Perform a render (for compatibility)
-    pub fn render(&mut self) -> io::Result<()> {
-        // In inline mode, components are rendered as they're added
-        // This is a no-op for compatibility with the API
-        io::stdout().flush()
-    }
-
-    /// Force a full redraw (no-op in inline mode)
-    pub fn force_redraw(&mut self) {
-        // No-op in inline mode
-    }
-
-    /// Clear all components
-    pub fn clear(&mut self) {
-        self.components.clear();
-        self.layout.clear();
-        self.prompt_id = None;
     }
 
     /// Get terminal width
@@ -276,33 +272,10 @@ impl DifferentialRenderer {
         self.terminal_size.width
     }
 
-    /// Get terminal height
-    pub fn height(&self) -> u16 {
-        self.terminal_size.height
+    /// Whether colors are enabled
+    pub fn use_colors(&self) -> bool {
+        self.use_colors
     }
-
-    /// Scroll to bottom (no-op in inline mode)
-    pub fn scroll_to_bottom(&mut self) {
-        // No-op in inline mode
-    }
-
-    /// Scroll (no-op in inline mode)
-    pub fn scroll(&mut self, _lines: i16) {
-        // No-op in inline mode
-    }
-
-    /// Tick spinner animation
-    pub fn tick_spinner(&mut self, id: ComponentId) {
-        if let Some(entry) = self.components.get_mut(&id)
-            && let Some(spinner) = entry.component.as_any_mut().downcast_mut::<SpinnerComponent>() {
-                spinner.tick();
-            }
-    }
-}
-
-/// Helper trait to access component internals for downcasting
-pub trait AsAny {
-    fn as_any_mut(&mut self) -> &mut dyn Any;
 }
 
 #[cfg(test)]
@@ -328,18 +301,18 @@ mod tests {
         let id = next_component_id();
         let component = UserInputComponent::new(id, "hello".to_string(), true);
         let buffer = component.render(20);
-        
+
         // Check dimensions - should be 3 rows (top padding, content, bottom padding)
         assert_eq!(buffer.height, 3);
         assert_eq!(buffer.width, 20);
-        
+
         // Check that background is set on all cells
         for row in &buffer.cells {
             for cell in row {
                 assert_eq!(cell.bg, Color::Ansi(235), "Background should be ANSI 235");
             }
         }
-        
+
         // Top and bottom rows should be all spaces
         for cell in &buffer.cells[0] {
             assert_eq!(cell.char, ' ', "Top row should be all spaces");
@@ -347,7 +320,7 @@ mod tests {
         for cell in &buffer.cells[2] {
             assert_eq!(cell.char, ' ', "Bottom row should be all spaces");
         }
-        
+
         // Middle row should contain "  hello  "
         let middle_row = &buffer.cells[1];
         assert_eq!(middle_row[0].char, ' ');
@@ -364,36 +337,41 @@ mod tests {
     #[test]
     fn test_buffer_to_string() {
         let renderer = DifferentialRenderer::new(true);
-        
+
         let id = next_component_id();
         let component = UserInputComponent::new(id, "test".to_string(), true);
         let buffer = component.render(10);
         let output = renderer.buffer_to_string(&buffer);
-        
-        // Output should contain ANSI escape codes for background color
-        assert!(output.contains("\x1b[48;5;235m"), "Should contain background ANSI code");
+
+        assert!(
+            output.contains("\x1b[48;5;235m"),
+            "Should contain background ANSI code"
+        );
         assert!(output.contains("test"), "Should contain the text");
     }
 
     #[test]
     fn test_user_input_full_output() {
         let renderer = DifferentialRenderer::new(true);
-        
+
         let id = next_component_id();
         let component = UserInputComponent::new(id, "hello world".to_string(), true);
         let buffer = component.render(20);
         let output = renderer.buffer_to_string(&buffer);
-        
-        // Should have 3 lines
+
         let lines: Vec<&str> = output.lines().collect();
         assert_eq!(lines.len(), 3, "Should have 3 lines");
-        
-        // Each line should have the background color
+
         for line in &lines {
-            assert!(line.contains("\x1b[48;5;235m"), "Each line should have background color");
+            assert!(
+                line.contains("\x1b[48;5;235m"),
+                "Each line should have background color"
+            );
         }
-        
-        // Middle line should contain "hello world"
-        assert!(lines[1].contains("hello world"), "Middle line should contain the text");
+
+        assert!(
+            lines[1].contains("hello world"),
+            "Middle line should contain the text"
+        );
     }
 }

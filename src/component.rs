@@ -1,8 +1,4 @@
 //! Core component system for differential rendering
-//!
-//! Every UI element is a component that can be independently rendered.
-
-#![allow(dead_code)]
 
 use std::any::Any;
 use std::fmt;
@@ -12,21 +8,8 @@ use std::fmt;
 pub struct ComponentId(pub u64);
 
 impl fmt::Display for ComponentId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "ComponentId({})", self.0)
-    }
-}
-
-/// Position in the terminal (1-indexed, like ANSI escape codes)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct Position {
-    pub row: u16,
-    pub col: u16,
-}
-
-impl Position {
-    pub fn new(row: u16, col: u16) -> Self {
-        Self { row, col }
     }
 }
 
@@ -43,25 +26,8 @@ impl Size {
     }
 }
 
-/// A rectangular region in the terminal
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct Rect {
-    pub pos: Position,
-    pub size: Size,
-}
-
-impl Rect {
-    pub fn new(row: u16, col: u16, width: u16, height: u16) -> Self {
-        Self {
-            pos: Position::new(row, col),
-            size: Size::new(width, height),
-        }
-    }
-}
-
 /// A single cell in the terminal grid
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)]
 pub struct Cell {
     pub char: char,
     pub fg: Color,
@@ -81,8 +47,8 @@ impl Default for Cell {
 }
 
 /// Terminal colors
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Color {
     Default,
     Black,
@@ -156,16 +122,6 @@ impl Buffer {
         }
     }
 
-    pub fn get_mut(&mut self, row: u16, col: u16) -> Option<&mut Cell> {
-        self.cells.get_mut(row as usize)?.get_mut(col as usize)
-    }
-
-    pub fn set(&mut self, row: u16, col: u16, cell: Cell) {
-        if let Some(c) = self.get_mut(row, col) {
-            *c = cell;
-        }
-    }
-
     /// Write a string at a position, wrapping at the buffer width
     pub fn write_str(&mut self, row: u16, col: u16, s: &str, fg: Color, bg: Color, modifiers: Modifiers) -> u16 {
         let mut current_row = row;
@@ -187,12 +143,16 @@ impl Buffer {
                 break;
             }
 
-            self.set(current_row, current_col, Cell {
-                char: ch,
-                fg,
-                bg,
-                modifiers,
-            });
+            if let Some(cell) = self.cells.get_mut(current_row as usize)
+                .and_then(|r| r.get_mut(current_col as usize))
+            {
+                *cell = Cell {
+                    char: ch,
+                    fg,
+                    bg,
+                    modifiers,
+                };
+            }
             current_col += 1;
         }
 
@@ -214,7 +174,6 @@ impl Buffer {
 pub fn format_cell_style(fg: &Color, bg: &Color, mods: &Modifiers) -> String {
     let mut codes: Vec<String> = Vec::new();
 
-    // Modifiers
     if mods.bold { codes.push("1".to_string()); }
     if mods.dim { codes.push("2".to_string()); }
     if mods.italic { codes.push("3".to_string()); }
@@ -224,7 +183,6 @@ pub fn format_cell_style(fg: &Color, bg: &Color, mods: &Modifiers) -> String {
     if mods.hidden { codes.push("8".to_string()); }
     if mods.strikethrough { codes.push("9".to_string()); }
 
-    // Foreground color
     match fg {
         Color::Default => {}
         Color::Black => codes.push("30".to_string()),
@@ -247,7 +205,6 @@ pub fn format_cell_style(fg: &Color, bg: &Color, mods: &Modifiers) -> String {
         Color::Rgb { r, g, b } => codes.push(format!("38;2;{};{};{}", r, g, b)),
     }
 
-    // Background color
     match bg {
         Color::Default => {}
         Color::Black => codes.push("40".to_string()),
@@ -286,77 +243,10 @@ pub trait Component: std::fmt::Debug + Send {
     fn render(&self, width: u16) -> Buffer;
 
     /// Get the component's preferred height for a given width
+    #[allow(dead_code)]
     fn preferred_height(&self, width: u16) -> u16;
 
-    /// Whether this component is visible
-    fn is_visible(&self) -> bool {
-        true
-    }
-
     /// Get a mutable reference to self as Any for downcasting
+    #[allow(dead_code)]
     fn as_any_mut(&mut self) -> &mut dyn Any;
-}
-
-// Allow unused variants and methods - they're part of the public API
-#[allow(dead_code)]
-impl Color {
-    pub fn from_hex(s: &str) -> Option<Self> {
-        let s = s.trim_start_matches('#');
-        if s.len() != 6 {
-            return None;
-        }
-        let r = u8::from_str_radix(&s[0..2], 16).ok()?;
-        let g = u8::from_str_radix(&s[2..4], 16).ok()?;
-        let b = u8::from_str_radix(&s[4..6], 16).ok()?;
-        Some(Color::Rgb { r, g, b })
-    }
-}
-
-#[allow(dead_code)]
-impl Modifiers {
-    pub fn italic() -> Self {
-        Self { italic: true, ..Default::default() }
-    }
-
-    pub fn underline() -> Self {
-        Self { underline: true, ..Default::default() }
-    }
-}
-
-#[allow(dead_code)]
-impl Buffer {
-    pub fn get(&self, row: u16, col: u16) -> Option<&Cell> {
-        self.cells.get(row as usize)?.get(col as usize)
-    }
-}
-
-#[allow(dead_code)]
-impl Cell {
-    pub fn new(char: char) -> Self {
-        Self {
-            char,
-            fg: Color::Default,
-            bg: Color::Default,
-            modifiers: Modifiers::default(),
-        }
-    }
-
-    pub fn with_fg(mut self, fg: Color) -> Self {
-        self.fg = fg;
-        self
-    }
-
-    pub fn with_bg(mut self, bg: Color) -> Self {
-        self.bg = bg;
-        self
-    }
-
-    pub fn with_modifiers(mut self, modifiers: Modifiers) -> Self {
-        self.modifiers = modifiers;
-        self
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.char == ' ' && self.bg == Color::Default
-    }
 }

@@ -1,6 +1,8 @@
 use std::process::Command;
 use std::fs;
 use std::path::Path;
+use std::sync::mpsc;
+use std::thread;
 use anyhow::Result;
 
 /// Tools available to the agent
@@ -19,6 +21,17 @@ pub struct ToolResult {
     #[allow(dead_code)]
     pub success: bool,
     pub duration_secs: f64,
+}
+
+/// A line emitted from a streaming command
+#[derive(Debug)]
+pub enum StreamEvent {
+    /// A line of stdout
+    Stdout(String),
+    /// A line of stderr
+    Stderr(String),
+    /// Command finished with exit code
+    Done { exit_code: Option<i32> },
 }
 
 /// Execute a tool and return the result
@@ -120,6 +133,99 @@ fn truncate_output(output: &str, max_lines: usize) -> String {
     } else {
         output.to_string()
     }
+}
+
+/// Execute a bash command and stream its output line-by-line.
+///
+/// Returns a receiver that yields `StreamEvent` items as they arrive,
+/// and a `thread::JoinHandle` for the spawned process thread.
+/// The caller must drop/join the handle when done.
+pub fn execute_tool_streaming(
+    command: &str,
+) -> (mpsc::Receiver<StreamEvent>, thread::JoinHandle<()>) {
+    let (tx, rx) = mpsc::channel::<StreamEvent>();
+    let command = command.to_string();
+
+    let handle = thread::spawn(move || {
+        let child = match Command::new("sh")
+            .arg("-c")
+            .arg(&command)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+        {
+            Ok(c) => c,
+            Err(e) => {
+                let _ = tx.send(StreamEvent::Stderr(format!("Failed to spawn: {}", e)));
+                let _ = tx.send(StreamEvent::Done { exit_code: None });
+                return;
+            }
+        };
+
+        // Take stdout/stderr pipes before moving child into the wait thread
+        let mut child = child;
+        let stdout_pipe = child.stdout.take();
+        let stderr_pipe = child.stderr.take();
+
+        // Spawn a thread to read stdout line-by-line
+        let stdout_tx = tx.clone();
+        let stdout_handle = thread::spawn(move || {
+            if let Some(reader) = stdout_pipe {
+                use std::io::{BufRead, BufReader};
+                let mut buf_reader = BufReader::new(reader);
+                let mut line = String::new();
+                loop {
+                    line.clear();
+                    match buf_reader.read_line(&mut line) {
+                        Ok(0) => break,
+                        Ok(_) => {
+                            // Strip trailing newline for clean output
+                            let trimmed = line.trim_end_matches('\n').trim_end_matches('\r');
+                            if stdout_tx.send(StreamEvent::Stdout(trimmed.to_string())).is_err() {
+                                break;
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+            }
+        });
+
+        // Spawn a thread to read stderr line-by-line
+        let stderr_tx = tx.clone();
+        let stderr_handle = thread::spawn(move || {
+            if let Some(reader) = stderr_pipe {
+                use std::io::{BufRead, BufReader};
+                let mut buf_reader = BufReader::new(reader);
+                let mut line = String::new();
+                loop {
+                    line.clear();
+                    match buf_reader.read_line(&mut line) {
+                        Ok(0) => break,
+                        Ok(_) => {
+                            let trimmed = line.trim_end_matches('\n').trim_end_matches('\r');
+                            if stderr_tx.send(StreamEvent::Stderr(trimmed.to_string())).is_err() {
+                                break;
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+            }
+        });
+
+        // Wait for child to finish
+        let status = child.wait().ok();
+        let exit_code = status.and_then(|s| s.code());
+
+        // Wait for reader threads to finish draining
+        let _ = stdout_handle.join();
+        let _ = stderr_handle.join();
+
+        let _ = tx.send(StreamEvent::Done { exit_code });
+    });
+
+    (rx, handle)
 }
 
 /// Parse tools from LLM response

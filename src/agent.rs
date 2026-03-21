@@ -1,7 +1,8 @@
 //! Main agent that handles the conversation with inline rendering
 
-use std::io::Write;
+use std::io::{self, Write};
 use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
@@ -12,7 +13,7 @@ use crate::{
     llm::{LlmClient, Message},
     renderer::DifferentialRenderer,
     terminal::TerminalState,
-    tools::{self, Tool, execute_tool, is_dangerous},
+    tools::{self, Tool, execute_tool, execute_tool_streaming, is_dangerous, StreamEvent},
 };
 
 /// Main agent that handles the conversation
@@ -21,7 +22,6 @@ pub struct Agent {
     renderer: DifferentialRenderer,
     llm_client: LlmClient,
     history: Vec<Message>,
-    config: Config,
 }
 
 impl Agent {
@@ -29,14 +29,13 @@ impl Agent {
     pub fn new(config: Config) -> Result<Self> {
         let terminal = TerminalState::new()?;
         let renderer = DifferentialRenderer::new(config.ui.use_colors);
-        let llm_client = LlmClient::new(config.clone())?;
+        let llm_client = LlmClient::new(config)?;
 
         Ok(Self {
             terminal,
             renderer,
             llm_client,
             history: Vec::new(),
-            config,
         })
     }
 
@@ -167,19 +166,77 @@ impl Agent {
                             continue;
                         }
 
-                        // Execute with timing
-                        let result = execute_tool(tool)?;
+                        // Show command header immediately
+                        self.renderer.print_bash_header(command);
 
-                        // Show result
-                        self.renderer.add_tool_result(
-                            "bash".to_string(),
-                            result.output.clone(),
-                            Some(result.duration_secs),
-                            result.success,
-                            Some(command.clone()),
-                        );
+                        // Start streaming
+                        let (rx, _handle) = execute_tool_streaming(command);
+                        let start = std::time::Instant::now();
+                        let mut output_lines: Vec<String> = Vec::new();
+                        let mut exit_code: Option<i32> = None;
 
-                        all_results.push_str(&format!("$ {}\n{}\n", command, result.output));
+                        // Spawn a live timer thread — simple inline timer with bg
+                        let timer_alive = Arc::new(AtomicBool::new(true));
+                        let timer_alive_clone = timer_alive.clone();
+                        let timer_start = start.clone();
+                        let use_colors = self.renderer.use_colors();
+                        let term_width = self.renderer.width();
+                        let timer_thread = thread::spawn(move || {
+                            while timer_alive_clone.load(Ordering::Relaxed) {
+                                let elapsed = timer_start.elapsed().as_secs_f64();
+                                if use_colors {
+                                    let width = term_width as usize;
+                                    let bg = "\x1b[48;2;30;38;30m";
+                                    let reset = "\x1b[0m";
+                                    let timing = format!("  Took {:.1}s", elapsed);
+                                    let padding = " ".repeat(width.saturating_sub(timing.len()));
+                                    // Timer with bg color across full row
+                                    print!("\r{}{}{}{}", bg, timing, padding, reset);
+                                } else {
+                                    print!("\r  Took {:.1}s", elapsed);
+                                }
+                                let _ = io::stdout().flush();
+                                thread::sleep(Duration::from_millis(100));
+                            }
+                        });
+
+                        loop {
+                            match rx.recv_timeout(Duration::from_millis(50)) {
+                                Ok(StreamEvent::Stdout(line)) => {
+                                    self.renderer.clear_timer_line();
+                                    self.renderer.print_output_line(&line);
+                                    output_lines.push(line);
+                                }
+                                Ok(StreamEvent::Stderr(line)) => {
+                                    self.renderer.clear_timer_line();
+                                    self.renderer.print_output_line(&line);
+                                    output_lines.push(line);
+                                }
+                                Ok(StreamEvent::Done { exit_code: ec }) => {
+                                    exit_code = ec;
+                                    break;
+                                }
+                                Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                            }
+                        }
+
+                        // Stop timer thread and wait for it
+                        timer_alive.store(false, Ordering::Relaxed);
+                        let _ = timer_thread.join();
+
+                        let duration = start.elapsed().as_secs_f64();
+                        let success = exit_code == Some(0);
+
+                        // Clear last timer tick, then print gap + timing + bottom pad
+                        self.renderer.clear_timer_line();
+                        self.renderer.print_bash_footer(duration, success);
+
+                        all_results.push_str(&format!(
+                            "$ {}\n{}\n",
+                            command,
+                            output_lines.join("\n")
+                        ));
                     }
                     Tool::ReadFile { path } => {
                         // Show tool call header
