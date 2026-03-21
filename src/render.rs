@@ -119,8 +119,10 @@ impl InlineRenderer {
     /// Render agent response with markdown support
     pub fn render_response(&mut self, text: &str) -> io::Result<()> {
         if self.use_colors {
-            // Render markdown
-            let rendered = self.skin.text(text, Some(self.width()));
+            // Create area with full terminal width
+            let width = self.width();
+            let area = termimad::Area::new(0, 0, width as u16, 100); // Large height
+            let rendered = self.skin.area_text(text, &area);
             print!("{}", rendered);
         } else {
             for line in text.lines() {
