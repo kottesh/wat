@@ -178,7 +178,7 @@ impl Agent {
                         if tool_call.name == "bash" {
                             r.start_bash(tool_call.args["command"].as_str().unwrap_or(""));
                         } else {
-                            r.add_tool_call(tool_call.name.clone(), tool_call.args.to_string());
+                            r.add_tool_call(tool_call.name.clone(), tool.display_call(&tool_call.args));
                         }
                         r.render();
                     }
@@ -287,16 +287,25 @@ impl Agent {
 
         let mut tools_desc = String::new();
         for tool in self.registry.list() {
-            tools_desc.push_str(&format!("- ```{}\\nargs```: {}\n", tool.name(), tool.description()));
+            tools_desc.push_str(&format!("- ```{}\\ncontent```: {}\n", tool.name(), tool.description()));
         }
 
         format!(
             r#"You are WAT, a terminal assistant. 
-
 OS: {} | CWD: {}
 
-Tools:
-{}"#,
+Available Tools:
+{}
+Tool Rules:
+1. To call a tool, you MUST use the Markdown block format: 
+   ```tool_name
+   content
+   ```
+2. For bash, 'content' is the shell command.
+3. For read_file, 'content' is the file path.
+4. DO NOT write tool names as plain text. You MUST use code blocks.
+5. DO NOT try to run 'read_file' inside a 'bash' block.
+6. Prefer 'read_file' over 'cat' for reading files."#,
             os, cwd, tools_desc
         )
     }

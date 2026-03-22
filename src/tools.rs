@@ -27,9 +27,15 @@ pub enum ToolUpdate {
 #[async_trait]
 pub trait Tool: Send + Sync {
     fn name(&self) -> &str;
+    fn aliases(&self) -> Vec<String> { Vec::new() }
     fn description(&self) -> &str;
     fn schema(&self) -> Value;
     fn primary_arg_name(&self) -> &str;
+    
+    /// Returns a human-readable string for the tool call (for the UI)
+    fn display_call(&self, args: &Value) -> String {
+        format!("{} {}", self.name(), args[self.primary_arg_name()].as_str().unwrap_or(""))
+    }
     
     async fn execute(
         &self, 
@@ -43,8 +49,12 @@ pub struct BashTool;
 #[async_trait]
 impl Tool for BashTool {
     fn name(&self) -> &str { "bash" }
+    fn aliases(&self) -> Vec<String> { vec!["sh".to_string(), "shell".to_string()] }
     fn description(&self) -> &str { "Execute shell commands" }
     fn primary_arg_name(&self) -> &str { "command" }
+    fn display_call(&self, args: &Value) -> String {
+        format!("$ {}", args["command"].as_str().unwrap_or(""))
+    }
     fn schema(&self) -> Value {
         serde_json::json!({
             "type": "object",
@@ -100,8 +110,12 @@ pub struct ReadFileTool;
 #[async_trait]
 impl Tool for ReadFileTool {
     fn name(&self) -> &str { "read_file" }
+    fn aliases(&self) -> Vec<String> { vec!["file".to_string()] }
     fn description(&self) -> &str { "Read file contents with line numbers" }
     fn primary_arg_name(&self) -> &str { "path" }
+    fn display_call(&self, args: &Value) -> String {
+        args["path"].as_str().unwrap_or("").to_string()
+    }
     fn schema(&self) -> Value {
         serde_json::json!({
             "type": "object",
@@ -118,13 +132,14 @@ impl Tool for ReadFileTool {
         _on_update: Box<dyn Fn(ToolUpdate) + Send + Sync>
     ) -> Result<ToolResult> {
         let path_str = args["path"].as_str().ok_or_else(|| anyhow::anyhow!("Missing path"))?;
-        let path = Path::new(path_str);
+        let expanded_path = shellexpand::tilde(path_str).to_string();
+        let path = Path::new(&expanded_path);
         let start = std::time::Instant::now();
         
         if !path.exists() {
             return Ok(ToolResult {
-                content: format!("File not found: {}", path.display()),
-                details: serde_json::json!({ "error": "File not found" }),
+                content: format!("File not found: {}", path_str),
+                details: serde_json::json!({ "error": "File not found", "path": path_str }),
                 success: false,
                 duration_secs: start.elapsed().as_secs_f64(),
             });
@@ -314,21 +329,27 @@ pub fn parse_tools(response: &str, registry: &ToolRegistry) -> Vec<ToolCall> {
     
     for tool in registry.list() {
         let name = tool.name();
-        let marker = format!("```{}\n", name);
-        let mut search_start = 0;
-        while let Some(start) = response[search_start..].find(&marker) {
-            let content_start = search_start + start + marker.len();
-            if let Some(end) = response[content_start..].find("```") {
-                let content = response[content_start..content_start + end].trim();
-                if !content.is_empty() {
-                    tools.push(ToolCall { 
-                        name: name.to_string(), 
-                        args: serde_json::json!({ tool.primary_arg_name(): content.to_string() }) 
-                    });
+        let mut markers = vec![format!("```{}\n", name)];
+        for alias in tool.aliases() {
+            markers.push(format!("```{}\n", alias));
+        }
+
+        for marker in markers {
+            let mut search_start = 0;
+            while let Some(start) = response[search_start..].find(&marker) {
+                let content_start = search_start + start + marker.len();
+                if let Some(end) = response[content_start..].find("```") {
+                    let content = response[content_start..content_start + end].trim();
+                    if !content.is_empty() {
+                        tools.push(ToolCall { 
+                            name: name.to_string(), 
+                            args: serde_json::json!({ tool.primary_arg_name(): content.to_string() }) 
+                        });
+                    }
+                    search_start = content_start + end + 3;
+                } else {
+                    break;
                 }
-                search_start = content_start + end + 3;
-            } else {
-                break;
             }
         }
     }
