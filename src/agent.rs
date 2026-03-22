@@ -175,7 +175,7 @@ impl Agent {
                         let mut output_lines: Vec<String> = Vec::new();
                         let mut exit_code: Option<i32> = None;
 
-                        // Spawn a live timer thread — simple inline timer with bg
+                        // Spawn a live timer thread — timer with bottom padding
                         let timer_alive = Arc::new(AtomicBool::new(true));
                         let timer_alive_clone = timer_alive.clone();
                         let timer_start = start.clone();
@@ -188,12 +188,19 @@ impl Agent {
                                     let width = term_width as usize;
                                     let bg = "\x1b[48;2;30;38;30m";
                                     let reset = "\x1b[0m";
-                                    let timing = format!("  Took {:.1}s", elapsed);
-                                    let padding = " ".repeat(width.saturating_sub(timing.len()));
-                                    // Timer with bg color across full row
-                                    print!("\r{}{}{}{}", bg, timing, padding, reset);
+                                    let empty = " ".repeat(width);
+                                    // Timer row
+                                    let content = format!("  Took {:.1}s", elapsed);
+                                    let padding = " ".repeat(width.saturating_sub(content.len()));
+                                    print!("{}{}{}{}\r\n", bg, content, padding, reset);
+                                    // Bottom padding
+                                    print!("{}{}{}\r\n", bg, empty, reset);
+                                    // Move back up 2 lines so timer overwrites itself next time
+                                    print!("\x1b[2F");
                                 } else {
-                                    print!("\r  Took {:.1}s", elapsed);
+                                    println!("  Took {:.1}s", elapsed);
+                                    println!();
+                                    print!("\x1b[2F");
                                 }
                                 let _ = io::stdout().flush();
                                 thread::sleep(Duration::from_millis(100));

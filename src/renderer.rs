@@ -172,9 +172,13 @@ impl DifferentialRenderer {
         let _ = io::stdout().flush();
     }
 
-    /// Clear the current timer line so output can take its place.
+    /// Clear the timer line and bottom padding (2 lines total).
+    /// Cursor should be on timer line when called.
     pub fn clear_timer_line(&self) {
-        print!("\r\x1b[2K");
+        print!("\r\x1b[2K");  // Clear timer line (where cursor is)
+        print!("\x1b[1B");    // Move down to bottom padding line
+        print!("\r\x1b[2K");  // Clear bottom padding line
+        print!("\x1b[1A");    // Move back up to timer line (ready for output)
         let _ = io::stdout().flush();
     }
 
