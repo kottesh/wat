@@ -1,4 +1,4 @@
-//! Main agent that handles the conversation with inline rendering
+//! Main agent – conversation loop with inline rendering.
 
 use std::io::{self, Write};
 use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
@@ -12,11 +12,10 @@ use crate::{
     config::Config,
     llm::{LlmClient, Message},
     renderer::DifferentialRenderer,
-    terminal::TerminalState,
+    terminal::{ReadResult, TerminalState},
     tools::{self, Tool, execute_tool, execute_tool_streaming, is_dangerous, StreamEvent},
 };
 
-/// Main agent that handles the conversation
 pub struct Agent {
     terminal: TerminalState,
     renderer: DifferentialRenderer,
@@ -25,197 +24,182 @@ pub struct Agent {
 }
 
 impl Agent {
-    /// Create new agent
     pub fn new(config: Config) -> Result<Self> {
         let terminal = TerminalState::new()?;
         let renderer = DifferentialRenderer::new(config.ui.use_colors);
         let llm_client = LlmClient::new(config)?;
-
-        Ok(Self {
-            terminal,
-            renderer,
-            llm_client,
-            history: Vec::new(),
-        })
+        Ok(Self { terminal, renderer, llm_client, history: Vec::new() })
     }
 
-    /// Run the agent loop
     pub async fn run_interactive(&mut self) -> Result<()> {
-        // Enter raw mode for proper input handling
         self.terminal.enter_raw_mode()?;
-        
-        // Ensure we restore terminal on exit
         let result = self.main_loop().await;
-        
-        // Restore terminal
         let _ = self.terminal.exit_raw_mode();
-        
         result
     }
 
-    /// Main event loop
     async fn main_loop(&mut self) -> Result<()> {
+        // Draw the initial input box — every subsequent render keeps it at the bottom.
+        self.renderer.draw_input_box();
+
         loop {
-            // Update terminal size
             self.renderer.update_size();
 
-            // Read input using the original inline style
-            let input = self.terminal.read_line("");
+            match self.terminal.read_line()? {
+                ReadResult::Escape => {
+                    // ESC while idle: clear any half-typed text, stay in loop
+                    self.renderer.clear_input_line();
+                    continue;
+                }
+                ReadResult::Input(raw) => {
+                    let input = raw.trim().to_string();
 
-            let input = match input {
-                Ok(i) => i,
-                Err(_) => break,
-            };
+                    if input.is_empty() {
+                        continue;
+                    }
+                    if input == "exit" || input == "quit" || input == "q" {
+                        break;
+                    }
 
-            let input = input.trim();
+                    // Commit the typed text as a styled UserInput component.
+                    // render_component moves above the input box, prints the
+                    // component, then redraws the input box below.
+                    self.renderer.add_user_input(input.clone());
 
-            // Exit conditions
-            if input.is_empty() || input == "exit" || input == "quit" || input == "q" {
-                break;
-            }
+                    if input == "clear" {
+                        self.history.clear();
+                        continue;
+                    }
 
-            // Show user input
-            self.renderer.add_user_input(input.to_string());
-
-            // Special commands
-            if input == "clear" {
-                self.history.clear();
-                println!("History cleared.");
-                continue;
-            }
-
-            // Process with agent
-            if let Err(e) = self.agent_loop(input).await {
-                self.renderer.add_error(e.to_string());
+                    if let Err(e) = self.agent_loop(&input).await {
+                        self.renderer.add_error(e.to_string());
+                    }
+                }
             }
         }
 
         Ok(())
     }
 
-    /// Main agent loop - handles tool use
     async fn agent_loop(&mut self, query: &str) -> Result<()> {
-        // Add user message
         self.history.push(Message::user(query));
 
-        // Max iterations to prevent infinite loops
-        let max_iterations = 10;
-
-        for _ in 0..max_iterations {
-            // Build messages
+        for _ in 0..10 {
             let system = self.system_prompt();
             let mut messages = vec![Message::system(&system)];
             messages.extend(self.history.clone());
 
-            // Start animated spinner
+            // ── Spinner on the input line while waiting for LLM ──────────
             let spinner_running = Arc::new(AtomicBool::new(true));
-            let spinner_running_clone = spinner_running.clone();
-            
-            // Spawn spinner animation thread
+            let sr = spinner_running.clone();
+            let use_colors = self.renderer.use_colors();
+
             let spinner_handle = thread::spawn(move || {
                 let frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
                 let mut idx = 0usize;
-                while spinner_running_clone.load(Ordering::Relaxed) {
-                    // Print spinner frame: cyan frame, dimmed message
-                    print!("\r\x1b[96m{}\x1b[0m \x1b[2mThinking...\x1b[0m  ", frames[idx]);
-                    let _ = std::io::stdout().flush();
+                while sr.load(Ordering::Relaxed) {
+                    if use_colors {
+                        // Write to input line: up 2 → print → clear EOL → down 2
+                        print!(
+                            "\x1b[2F\r\x1b[96m{}\x1b[0m \x1b[2mThinking...\x1b[0m\x1b[K\x1b[2B\r",
+                            frames[idx]
+                        );
+                    } else {
+                        print!("\x1b[2F\r{} Thinking...\x1b[K\x1b[2B\r", frames[idx]);
+                    }
+                    let _ = io::stdout().flush();
                     idx = (idx + 1) % frames.len();
                     thread::sleep(Duration::from_millis(80));
                 }
-                // Clear the spinner line when done
-                print!("\r\x1b[2K");
-                let _ = std::io::stdout().flush();
+                // Clear input line
+                print!("\x1b[2F\r\x1b[K\x1b[2B\r");
+                let _ = io::stdout().flush();
             });
 
-            // Get LLM response
             let response = self.llm_client.query(messages).await;
 
-            // Stop spinner
             spinner_running.store(false, Ordering::Relaxed);
             let _ = spinner_handle.join();
 
             let response = response?;
-
-            // Parse for tools
             let tools = tools::parse_tools(&response.content);
 
             if tools.is_empty() {
-                // No tools - show response and done
                 self.history.push(Message::assistant(&response.content));
                 self.renderer.add_response(response.content);
                 break;
             }
 
-            // Show the response without the tool code blocks
             let display_response = tools::strip_tool_blocks(&response.content);
             if !display_response.is_empty() {
                 self.renderer.add_response(display_response);
             }
             self.history.push(Message::assistant(&response.content));
 
-            // Execute tools
             let mut all_results = String::new();
 
             for tool in &tools {
                 match tool {
                     Tool::Bash { command } => {
-                        // Check for dangerous commands
                         if is_dangerous(command) {
                             self.renderer.add_error(format!("Refusing dangerous command: {}", command));
                             all_results.push_str(&format!("Command refused (dangerous): {}\n", command));
                             continue;
                         }
 
-                        // Show command header immediately (grey while running)
+                        // Show "esc to cancel" hint on the input line
+                        if self.renderer.use_colors() {
+                            self.renderer.update_input_line(
+                                "\x1b[2m  esc to cancel\x1b[0m"
+                            );
+                        } else {
+                            self.renderer.update_input_line("  esc to cancel");
+                        }
+
+                        // Print bash header above the input box
                         self.renderer.print_bash_header(command);
 
-                        // Start streaming
                         let (rx, _handle) = execute_tool_streaming(command);
                         let start = std::time::Instant::now();
                         let mut output_lines: Vec<String> = Vec::new();
                         let mut exit_code: Option<i32> = None;
+                        let mut cancelled = false;
 
-                        // Spawn a live timer thread — always grey while running
+                        // Live elapsed-time updater on the input line
                         let timer_alive = Arc::new(AtomicBool::new(true));
-                        let timer_alive_clone = timer_alive.clone();
-                        let timer_start = start.clone();
-                        let use_colors = self.renderer.use_colors();
-                        let term_width = self.renderer.width();
+                        let ta = timer_alive.clone();
+                        let timer_start = start;
+                        let use_col = self.renderer.use_colors();
                         let timer_thread = thread::spawn(move || {
-                            while timer_alive_clone.load(Ordering::Relaxed) {
-                                let elapsed = timer_start.elapsed().as_secs_f64();
-                                if use_colors {
-                                    let width = term_width as usize;
-                                    let bg    = "\x1b[48;2;39;39;39m"; // grey while running
-                                    let reset = "\x1b[0m";
-                                    let empty = " ".repeat(width);
-                                    // Timer row
-                                    let content = format!("  Took {:.1}s", elapsed);
-                                    let padding = " ".repeat(width.saturating_sub(content.len()));
-                                    print!("{}{}{}{}\r\n", bg, content, padding, reset);
-                                    // Bottom padding
-                                    print!("{}{}{}\r\n", bg, empty, reset);
-                                    // Move back up 2 lines so timer overwrites itself next tick
-                                    print!("\x1b[2F");
+                            while ta.load(Ordering::Relaxed) {
+                                let secs = timer_start.elapsed().as_secs_f64();
+                                if use_col {
+                                    print!(
+                                        "\x1b[2F\r\x1b[2m  esc to cancel  {:.1}s\x1b[0m\x1b[K\x1b[2B\r",
+                                        secs
+                                    );
                                 } else {
-                                    println!("  Took {:.1}s", elapsed);
-                                    println!();
-                                    print!("\x1b[2F");
+                                    print!("\x1b[2F\r  esc to cancel  {:.1}s\x1b[K\x1b[2B\r", secs);
                                 }
                                 let _ = io::stdout().flush();
                                 thread::sleep(Duration::from_millis(100));
                             }
                         });
 
+                        // Streaming loop — also checks stdin for ESC
                         loop {
+                            // Non-blocking ESC check
+                            if stdin_has_esc() {
+                                cancelled = true;
+                                break;
+                            }
+
                             match rx.recv_timeout(Duration::from_millis(50)) {
                                 Ok(StreamEvent::Stdout(line)) => {
-                                    self.renderer.clear_timer_line();
                                     self.renderer.print_output_line(&line);
                                     output_lines.push(line);
                                 }
                                 Ok(StreamEvent::Stderr(line)) => {
-                                    self.renderer.clear_timer_line();
                                     self.renderer.print_output_line(&line);
                                     output_lines.push(line);
                                 }
@@ -228,31 +212,42 @@ impl Agent {
                             }
                         }
 
-                        // Stop timer and wait for it to park cursor on the timer line
                         timer_alive.store(false, Ordering::Relaxed);
                         let _ = timer_thread.join();
 
                         let duration = start.elapsed().as_secs_f64();
-                        let success  = exit_code == Some(0);
+                        let success = !cancelled && exit_code == Some(0);
 
-                        // Repaint the entire block (header + output + footer) with
-                        // the final green/red colour in one shot.
-                        self.renderer.finalize_bash_block(command, &output_lines, duration, success);
+                        // Clear the hint/timer from the input line
+                        self.renderer.clear_input_line();
 
-                        all_results.push_str(&format!(
-                            "$ {}\n{}\n",
+                        // Repaint the full bash block with the final colour
+                        self.renderer.finalize_bash_block(
                             command,
-                            output_lines.join("\n")
-                        ));
+                            &output_lines,
+                            duration,
+                            success,
+                            cancelled,
+                        );
+
+                        if cancelled {
+                            all_results.push_str(&format!(
+                                "$ {}\n{}\n(cancelled)\n",
+                                command,
+                                output_lines.join("\n")
+                            ));
+                            break; // stop executing further tools in this turn
+                        } else {
+                            all_results.push_str(&format!(
+                                "$ {}\n{}\n",
+                                command,
+                                output_lines.join("\n")
+                            ));
+                        }
                     }
                     Tool::ReadFile { path } => {
-                        // Show tool call header
                         self.renderer.add_tool_call("read_file".to_string(), path.clone());
-
-                        // Execute
                         let result = execute_tool(tool)?;
-
-                        // Show result
                         self.renderer.add_tool_result(
                             "read_file".to_string(),
                             result.output.clone(),
@@ -260,13 +255,11 @@ impl Agent {
                             result.success,
                             None,
                         );
-
                         all_results.push_str(&format!("File: {}\n{}\n", path, result.output));
                     }
                 }
             }
 
-            // Add results to history for next iteration
             if !all_results.is_empty() {
                 self.history.push(Message::user(&format!("Tool output:\n{}", all_results)));
             }
@@ -275,7 +268,6 @@ impl Agent {
         Ok(())
     }
 
-    /// Build system prompt
     fn system_prompt(&self) -> String {
         let cwd = std::env::current_dir()
             .map(|p| p.display().to_string())
@@ -296,4 +288,19 @@ When asked to do something, use the appropriate tool. Show the tool call you're 
     }
 }
 
-
+/// Non-blocking check: returns true if stdin has a byte available AND it is ESC (0x1b).
+/// If a non-ESC byte is present it is silently consumed (it's from an arrow key, etc.).
+fn stdin_has_esc() -> bool {
+    use std::os::unix::io::AsRawFd;
+    let fd = io::stdin().as_raw_fd();
+    let mut pfd = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
+    let ret = unsafe { libc::poll(&mut pfd as *mut _, 1, 0) };
+    if ret > 0 && (pfd.revents & libc::POLLIN) != 0 {
+        let mut buf = [0u8; 1];
+        let n = unsafe { libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, 1) };
+        if n == 1 && buf[0] == 0x1b {
+            return true;
+        }
+    }
+    false
+}
