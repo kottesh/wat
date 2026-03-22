@@ -46,8 +46,12 @@ impl TerminalState {
         // Get terminal width
         let width = crossterm::terminal::size().map(|(w, _)| w as usize).unwrap_or(80);
 
+        // Add 1 blank row as gap from last component (render_component already adds 1)
+        print!("\r\n");
+
         // Draw 3-line input area: top border, input line, bottom border
-        let line = format!("\x1b[38;5;152m{}\x1b[0m", "─".repeat(width));
+        // Use width - 1 to avoid terminal auto-wrap when printing exactly width chars
+        let line = format!("\x1b[38;5;152m{}\x1b[0m", "─".repeat(width.saturating_sub(1)));
         print!("{}\r\n", line);      // Line 1: Top border
         print!("\r\n");               // Line 2: Empty input line
         print!("{}", line);           // Line 3: Bottom border (cursor here now)
@@ -87,14 +91,10 @@ impl TerminalState {
             }
         }
 
-        // Clear the 3-line prompt area before returning
-        print!("\r\x1b[1A");    // Go up to top border (line 1)
-        print!("\x1b[2K");      // Clear top border
-        print!("\r\x1b[1B");    // Go down to input line (line 2)
-        print!("\x1b[2K");      // Clear input line  
-        print!("\r\x1b[1B");    // Go down to bottom border (line 3)
-        print!("\x1b[2K");      // Clear bottom border
-        print!("\r");           // Stay at start of this line
+        // Delete the 3-line prompt area (clear + delete lines to avoid blank accumulation)
+        // Move to top of input area (up 2 lines from current position)
+        print!("\x1b[2F");      // Move cursor up 2 lines to top border
+        print!("\x1b[3M");      // Delete 3 lines (top border, input line, bottom border)
         io::stdout().flush()?;
 
         Ok(input)
