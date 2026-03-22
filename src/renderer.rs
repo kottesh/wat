@@ -25,6 +25,11 @@ use crate::components::{
     ErrorComponent, ResponseComponent, ToolCallComponent, ToolResultComponent, UserInputComponent,
 };
 
+use std::sync::{Arc, Mutex};
+
+/// A thread-safe wrapper around the differential renderer
+pub type SharedRenderer = Arc<Mutex<DifferentialRenderer>>;
+
 static COMPONENT_ID_COUNTER: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(1);
 
@@ -344,9 +349,12 @@ impl DifferentialRenderer {
             lines.push(String::new());
         }
 
-        // Thinking spinner (above input box)
+        // Spinner OR Hint (above input box)
         if let Some(ref s) = self.spinner_text {
             lines.push(s.clone());
+            lines.push(String::new());
+        } else if let Some(ref h) = self.input_hint {
+            lines.push(h.clone());
             lines.push(String::new());
         }
 
@@ -368,15 +376,9 @@ impl DifferentialRenderer {
         let input_box_start_row = lines.len();
         lines.push(border.clone()); // top border
 
-        // Input line: hint > typed text (spinner moved above)
-        let mut cursor_col = 0;
-        let input_line = if let Some(ref h) = self.input_hint {
-            cursor_col = crate::renderer::visible_width(h);
-            h.clone()
-        } else {
-            cursor_col = crate::renderer::visible_width(&self.current_input) + 2;
-            format!("  {}", self.current_input)
-        };
+        // Input line: always show what the user is typing
+        let cursor_col = crate::renderer::visible_width(&self.current_input) + 2;
+        let input_line = format!("  {}", self.current_input);
         lines.push(input_line);
         lines.push(border); // bottom border
 

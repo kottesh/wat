@@ -7,9 +7,13 @@ use anyhow::{Result, Context};
 
 use crate::renderer::DifferentialRenderer;
 
-pub enum ReadResult {
-    Input(String),
-    Escape,
+pub enum InputEvent {
+    /// User pressed Enter with the current input string.
+    Submit(String),
+    /// User pressed Escape.
+    Cancel,
+    /// User pressed Ctrl-C or similar shutdown signal.
+    Shutdown,
 }
 
 pub struct TerminalState {
@@ -41,69 +45,74 @@ impl TerminalState {
         Ok(())
     }
 
-    /// Read one line of input, updating the renderer on every keypress so the
-    /// input box reflects what the user types in real time.
-    pub fn read_line(&self, renderer: &mut DifferentialRenderer) -> Result<ReadResult> {
-        let mut stdin = io::stdin();
-        let mut buf = [0u8; 1];
+    pub fn spawn_input_handler(
+        &self,
+        renderer: crate::renderer::SharedRenderer,
+    ) -> tokio::sync::mpsc::Receiver<InputEvent> {
+        let (tx, rx) = tokio::sync::mpsc::channel(100);
+        
+        std::thread::spawn(move || {
+            let mut stdin = io::stdin();
+            let mut buf = [0u8; 1];
 
-        loop {
-            stdin.read_exact(&mut buf)?;
+            loop {
+                if stdin.read_exact(&mut buf).is_err() {
+                    let _ = tx.blocking_send(InputEvent::Shutdown);
+                    break;
+                }
 
-            match buf[0] {
-                // Enter
-                b'\r' | b'\n' => {
-                    let input = renderer.take_input();
-                    return Ok(ReadResult::Input(input));
+                let b = buf[0];
+                let mut renderer_lock = renderer.lock().unwrap();
+
+                match b {
+                    // Enter
+                    b'\r' | b'\n' => {
+                        let input = renderer_lock.take_input();
+                        renderer_lock.render();
+                        if tx.blocking_send(InputEvent::Submit(input)).is_err() {
+                            break;
+                        }
+                    }
+                    // Backspace / DEL
+                    0x7f | 0x08 => {
+                        renderer_lock.pop_input_char();
+                        renderer_lock.render();
+                    }
+                    // Ctrl-C
+                    0x03 => {
+                        let _ = tx.blocking_send(InputEvent::Shutdown);
+                        break;
+                    }
+                    // ESC
+                    0x1b => {
+                        if let Ok(true) = is_plain_esc() {
+                            if tx.blocking_send(InputEvent::Cancel).is_err() {
+                                break;
+                            }
+                        }
+                    }
+                    // Printable
+                    byte if byte >= 0x20 && byte < 0x7f => {
+                        renderer_lock.push_input_char(byte as char);
+                        renderer_lock.render();
+                    }
+                    _ => {}
                 }
-                // Backspace / DEL
-                0x7f | 0x08 => {
-                    renderer.pop_input_char();
-                    renderer.render();
-                }
-                // Ctrl-C
-                0x03 => return Err(anyhow::anyhow!("Interrupted")),
-                // Ctrl-D
-                0x04 => return Err(anyhow::anyhow!("EOF")),
-                // ESC — drain any CSI sequence that may follow
-                0x1b => {
-                    let _ = self.drain_escape_sequence();
-                    renderer.clear_input();
-                    renderer.render();
-                    return Ok(ReadResult::Escape);
-                }
-                // Printable ASCII
-                b if b >= 0x20 && b < 0x7f => {
-                    renderer.push_input_char(b as char);
-                    renderer.render();
-                }
-                _ => {}
             }
-        }
+        });
+
+        rx
     }
+}
 
-    /// Non-blocking drain of escape-sequence bytes that follow 0x1b (e.g. arrow keys).
-    fn drain_escape_sequence(&self) -> io::Result<()> {
-        use std::os::unix::io::AsRawFd;
-        let fd = io::stdin().as_raw_fd();
-        for _ in 0..8 {
-            let mut pfd = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
-            let ret = unsafe { libc::poll(&mut pfd as *mut _, 1, 0) };
-            if ret <= 0 || pfd.revents & libc::POLLIN == 0 {
-                break;
-            }
-            let mut b = [0u8; 1];
-            let n = unsafe { libc::read(fd, b.as_mut_ptr() as *mut libc::c_void, 1) };
-            if n <= 0 {
-                break;
-            }
-            // CSI sequences end with a letter or ~
-            if b[0].is_ascii_alphabetic() || b[0] == b'~' {
-                break;
-            }
-        }
-        Ok(())
-    }
+/// Helper for the input thread to distinguish ESC from CSI sequences.
+fn is_plain_esc() -> io::Result<bool> {
+    use std::os::unix::io::AsRawFd;
+    let fd = io::stdin().as_raw_fd();
+    let mut pfd = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
+    // Wait a tiny bit to see if more bytes follow
+    let ret = unsafe { libc::poll(&mut pfd as *mut _, 1, 10) };
+    Ok(ret <= 0)
 }
 
 impl Drop for TerminalState {
