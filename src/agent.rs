@@ -237,7 +237,8 @@ impl Agent {
 
                         // Clear last timer tick, then print gap + timing + bottom pad
                         self.renderer.clear_timer_line();
-                        self.renderer.print_bash_footer(duration, success);
+                        let has_output = !output_lines.is_empty();
+                        self.renderer.print_bash_footer(duration, success, has_output);
 
                         all_results.push_str(&format!(
                             "$ {}\n{}\n",

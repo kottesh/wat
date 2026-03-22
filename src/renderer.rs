@@ -182,9 +182,9 @@ impl DifferentialRenderer {
         let _ = io::stdout().flush();
     }
 
-    /// Finalize: gap row + took X.Xs + bottom padding.
+    /// Finalize: gap row (if has_output) + took X.Xs + bottom padding.
     /// The caller must have already cleared any previous timer line.
-    pub fn print_bash_footer(&self, duration_secs: f64, success: bool) {
+    pub fn print_bash_footer(&self, duration_secs: f64, success: bool, has_output: bool) {
         if self.use_colors {
             let width = self.terminal_size.width as usize;
             let bg = if success {
@@ -194,8 +194,10 @@ impl DifferentialRenderer {
             };
             let reset = "\x1b[0m";
             let empty = " ".repeat(width);
-            // Gap between output and timer
-            print!("{}{}{}\r\n", bg, empty, reset);
+            // Gap between output and timer (only if there was output)
+            if has_output {
+                print!("{}{}{}\r\n", bg, empty, reset);
+            }
             // Timer row
             let content = format!("  Took {:.1}s", duration_secs);
             let padding = " ".repeat(width.saturating_sub(content.len()));
@@ -203,7 +205,9 @@ impl DifferentialRenderer {
             // Bottom padding
             print!("{}{}{}\r\n", bg, empty, reset);
         } else {
-            println!();
+            if has_output {
+                println!();
+            }
             println!("  Took {:.1}s", duration_secs);
             println!();
         }
