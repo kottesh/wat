@@ -114,7 +114,8 @@ impl Agent {
                         match event {
                             InputEvent::Shutdown => return Err(anyhow::anyhow!("Interrupted")),
                             InputEvent::Cancel => {
-                                // Currently LLM query isn't cancellable, just stay in loop
+                                // Abort the agent turn
+                                return Ok(());
                             }
                             _ => {} // Typing is handled by background thread
                         }
@@ -258,7 +259,11 @@ impl Agent {
                         let output_text = self.renderer.lock().unwrap().last_bash_output();
                         if cancelled {
                             all_results.push_str(&format!("$ {}\n{}\n(cancelled)\n", command, output_text));
-                            break;
+                            // Add results to history so far before aborting
+                            if !all_results.is_empty() {
+                                self.history.push(Message::user(&format!("Tool output:\n{}", all_results)));
+                            }
+                            return Ok(()); // Abort the whole agent turn
                         } else {
                             all_results.push_str(&format!("$ {}\n{}\n", command, output_text));
                         }

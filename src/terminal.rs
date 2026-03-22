@@ -52,26 +52,48 @@ impl TerminalState {
         let (tx, rx) = tokio::sync::mpsc::channel(100);
         
         std::thread::spawn(move || {
-            let mut stdin = io::stdin();
-            let mut buf = [0u8; 1];
+            use std::os::unix::io::AsRawFd;
+            let fd = io::stdin().as_raw_fd();
+            let mut b = [0u8; 1];
 
             loop {
-                if stdin.read_exact(&mut buf).is_err() {
+                let n = unsafe { libc::read(fd, b.as_mut_ptr() as *mut libc::c_void, 1) };
+                if n <= 0 {
                     let _ = tx.blocking_send(InputEvent::Shutdown);
                     break;
                 }
 
-                let b = buf[0];
+                let byte = b[0];
                 let mut renderer_lock = renderer.lock().unwrap();
 
-                match b {
-                    // Enter
-                    b'\r' | b'\n' => {
+                match byte {
+                    // Enter (\r)
+                    b'\r' => {
                         let input = renderer_lock.take_input();
                         renderer_lock.render();
                         if tx.blocking_send(InputEvent::Submit(input)).is_err() {
                             break;
                         }
+                    }
+                    // Ctrl + J (\n) - Move down
+                    b'\n' => {
+                        renderer_lock.move_cursor_down();
+                        renderer_lock.render();
+                    }
+                    // Ctrl + K - Move up
+                    0x0b => {
+                        renderer_lock.move_cursor_up();
+                        renderer_lock.render();
+                    }
+                    // Ctrl + U - Undo
+                    0x15 => {
+                        renderer_lock.undo();
+                        renderer_lock.render();
+                    }
+                    // Ctrl + R - Redo
+                    0x12 => {
+                        renderer_lock.redo();
+                        renderer_lock.render();
                     }
                     // Backspace / DEL
                     0x7f | 0x08 => {
@@ -83,12 +105,35 @@ impl TerminalState {
                         let _ = tx.blocking_send(InputEvent::Shutdown);
                         break;
                     }
-                    // ESC
+                    // ESC or sequence
                     0x1b => {
-                        if let Ok(true) = is_plain_esc() {
-                            if tx.blocking_send(InputEvent::Cancel).is_err() {
-                                break;
+                        match get_escape_type(fd) {
+                            EscapeType::Plain => {
+                                if tx.blocking_send(InputEvent::Cancel).is_err() {
+                                    break;
+                                }
                             }
+                            EscapeType::AltEnter => {
+                                renderer_lock.insert_newline();
+                                renderer_lock.render();
+                            }
+                            EscapeType::ArrowUp => {
+                                renderer_lock.move_cursor_up();
+                                renderer_lock.render();
+                            }
+                            EscapeType::ArrowDown => {
+                                renderer_lock.move_cursor_down();
+                                renderer_lock.render();
+                            }
+                            EscapeType::ArrowLeft => {
+                                renderer_lock.move_cursor_left();
+                                renderer_lock.render();
+                            }
+                            EscapeType::ArrowRight => {
+                                renderer_lock.move_cursor_right();
+                                renderer_lock.render();
+                            }
+                            _ => {}
                         }
                     }
                     // Printable
@@ -105,14 +150,44 @@ impl TerminalState {
     }
 }
 
-/// Helper for the input thread to distinguish ESC from CSI sequences.
-fn is_plain_esc() -> io::Result<bool> {
-    use std::os::unix::io::AsRawFd;
-    let fd = io::stdin().as_raw_fd();
+enum EscapeType {
+    Plain,
+    AltEnter,
+    ArrowUp,
+    ArrowDown,
+    ArrowRight,
+    ArrowLeft,
+    Unknown,
+}
+
+fn get_escape_type(fd: i32) -> EscapeType {
+    // Check if more data is available
     let mut pfd = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
-    // Wait a tiny bit to see if more bytes follow
-    let ret = unsafe { libc::poll(&mut pfd as *mut _, 1, 10) };
-    Ok(ret <= 0)
+    let ret = unsafe { libc::poll(&mut pfd as *mut _, 1, 20) };
+    if ret <= 0 { return EscapeType::Plain; }
+
+    let mut b1 = [0u8; 1];
+    if unsafe { libc::read(fd, b1.as_mut_ptr() as *mut libc::c_void, 1) } <= 0 {
+        return EscapeType::Plain;
+    }
+
+    match b1[0] {
+        b'\r' | b'\n' => EscapeType::AltEnter,
+        b'[' | b'O' => {
+            let mut b2 = [0u8; 1];
+            if unsafe { libc::read(fd, b2.as_mut_ptr() as *mut libc::c_void, 1) } <= 0 {
+                return EscapeType::Unknown;
+            }
+            match b2[0] {
+                b'A' => EscapeType::ArrowUp,
+                b'B' => EscapeType::ArrowDown,
+                b'C' => EscapeType::ArrowRight,
+                b'D' => EscapeType::ArrowLeft,
+                _ => EscapeType::Unknown,
+            }
+        }
+        _ => EscapeType::Unknown,
+    }
 }
 
 impl Drop for TerminalState {

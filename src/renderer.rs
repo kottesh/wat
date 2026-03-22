@@ -144,8 +144,17 @@ pub struct DifferentialRenderer {
     items: Vec<RenderItem>,
     /// Currently executing bash block (None when idle)
     current_bash: Option<BashBlock>,
-    /// Text the user is currently typing (shown on the input line)
-    current_input: String,
+    /// Current input lines for rendering
+    current_input: Vec<String>,
+    /// Cursor row within the multiline input (0-indexed)
+    input_cursor_row: usize,
+    /// Cursor column within the current input line (0-indexed)
+    input_cursor_col: usize,
+    
+    /// History for undo/redo
+    undo_stack: Vec<(Vec<String>, usize, usize)>,
+    redo_stack: Vec<(Vec<String>, usize, usize)>,
+
     /// Spinner text shown on the input line while LLM is thinking
     spinner_text: Option<String>,
     /// Hint text shown on the input line during bash (e.g. "esc to cancel")
@@ -171,7 +180,11 @@ impl DifferentialRenderer {
         Self {
             items: Vec::new(),
             current_bash: None,
-            current_input: String::new(),
+            current_input: vec![String::new()],
+            input_cursor_row: 0,
+            input_cursor_col: 0,
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
             spinner_text: None,
             input_hint: None,
             previous_lines: Vec::new(),
@@ -188,22 +201,120 @@ impl DifferentialRenderer {
         }
     }
 
-    // ── Input box state ─────────────────────────────────────────────────────
+    // ── Input box state (multiline editor) ──────────────────────────────────
+
+    fn save_undo(&mut self) {
+        self.undo_stack.push((self.current_input.clone(), self.input_cursor_row, self.input_cursor_col));
+        self.redo_stack.clear();
+        if self.undo_stack.len() > 100 {
+            self.undo_stack.remove(0);
+        }
+    }
+
+    pub fn undo(&mut self) {
+        if let Some(prev) = self.undo_stack.pop() {
+            self.redo_stack.push((self.current_input.clone(), self.input_cursor_row, self.input_cursor_col));
+            self.current_input = prev.0;
+            self.input_cursor_row = prev.1;
+            self.input_cursor_col = prev.2;
+        }
+    }
+
+    pub fn redo(&mut self) {
+        if let Some(next) = self.redo_stack.pop() {
+            self.undo_stack.push((self.current_input.clone(), self.input_cursor_row, self.input_cursor_col));
+            self.current_input = next.0;
+            self.input_cursor_row = next.1;
+            self.input_cursor_col = next.2;
+        }
+    }
 
     pub fn push_input_char(&mut self, c: char) {
-        self.current_input.push(c);
+        self.save_undo();
+        let row = self.input_cursor_row;
+        let col = self.input_cursor_col;
+        self.current_input[row].insert(col, c);
+        self.input_cursor_col += 1;
     }
 
     pub fn pop_input_char(&mut self) {
-        self.current_input.pop();
+        self.save_undo();
+        let row = self.input_cursor_row;
+        let col = self.input_cursor_col;
+
+        if col > 0 {
+            // Delete character on current line
+            self.current_input[row].remove(col - 1);
+            self.input_cursor_col -= 1;
+        } else if row > 0 {
+            // Merge current line with previous line
+            let current_line = self.current_input.remove(row);
+            let prev_row = row - 1;
+            let prev_len = self.current_input[prev_row].len();
+            self.current_input[prev_row].push_str(&current_line);
+            self.input_cursor_row = prev_row;
+            self.input_cursor_col = prev_len;
+        }
+    }
+
+    pub fn insert_newline(&mut self) {
+        self.save_undo();
+        let row = self.input_cursor_row;
+        let col = self.input_cursor_col;
+        let line = &mut self.current_input[row];
+        let remaining = line.split_off(col);
+        self.current_input.insert(row + 1, remaining);
+        self.input_cursor_row += 1;
+        self.input_cursor_col = 0;
+    }
+
+    pub fn move_cursor_up(&mut self) {
+        if self.input_cursor_row > 0 {
+            self.input_cursor_row -= 1;
+            self.input_cursor_col = self.input_cursor_col.min(self.current_input[self.input_cursor_row].len());
+        }
+    }
+
+    pub fn move_cursor_down(&mut self) {
+        if self.input_cursor_row + 1 < self.current_input.len() {
+            self.input_cursor_row += 1;
+            self.input_cursor_col = self.input_cursor_col.min(self.current_input[self.input_cursor_row].len());
+        }
+    }
+
+    pub fn move_cursor_left(&mut self) {
+        if self.input_cursor_col > 0 {
+            self.input_cursor_col -= 1;
+        } else if self.input_cursor_row > 0 {
+            self.input_cursor_row -= 1;
+            self.input_cursor_col = self.current_input[self.input_cursor_row].len();
+        }
+    }
+
+    pub fn move_cursor_right(&mut self) {
+        if self.input_cursor_col < self.current_input[self.input_cursor_row].len() {
+            self.input_cursor_col += 1;
+        } else if self.input_cursor_row + 1 < self.current_input.len() {
+            self.input_cursor_row += 1;
+            self.input_cursor_col = 0;
+        }
     }
 
     pub fn take_input(&mut self) -> String {
-        std::mem::take(&mut self.current_input)
+        let result = self.current_input.join("\n");
+        self.current_input = vec![String::new()];
+        self.input_cursor_row = 0;
+        self.input_cursor_col = 0;
+        self.undo_stack.clear();
+        self.redo_stack.clear();
+        result
     }
 
     pub fn clear_input(&mut self) {
-        self.current_input.clear();
+        self.save_undo();
+        self.current_input = vec![String::new()];
+        self.input_cursor_row = 0;
+        self.input_cursor_col = 0;
     }
 
     // ── Spinner ─────────────────────────────────────────────────────────────
@@ -376,13 +487,21 @@ impl DifferentialRenderer {
         let input_box_start_row = lines.len();
         lines.push(border.clone()); // top border
 
-        // Input line: always show what the user is typing
-        let cursor_col = crate::renderer::visible_width(&self.current_input) + 2;
-        let input_line = format!("  {}", self.current_input);
-        lines.push(input_line);
-        lines.push(border); // bottom border
+        // Multi-line input area (always visible)
+        let mut cursor_row = 0;
+        let mut cursor_col = 0;
 
-        let cursor_row = input_box_start_row + 1; // The input line
+        for (i, line) in self.current_input.iter().enumerate() {
+            lines.push(format!("  {}", line));
+            if i == self.input_cursor_row {
+                cursor_row = lines.len() - 1;
+                // Calculate cursor column based on actual chars before input_cursor_col
+                let prefix: String = line.chars().take(self.input_cursor_col).collect();
+                cursor_col = crate::renderer::visible_width(&prefix) + 2;
+            }
+        }
+
+        lines.push(border); // bottom border
 
         (lines, cursor_row, cursor_col)
     }
