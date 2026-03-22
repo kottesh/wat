@@ -66,8 +66,18 @@ impl TerminalState {
                 let mut renderer_lock = renderer.lock().unwrap();
 
                 match byte {
+                    // Ctrl + F - Toggle fuzzy search
+                    0x06 => {
+                        renderer_lock.toggle_fuzzy_mode();
+                        renderer_lock.render();
+                    }
                     // Enter (\r)
                     b'\r' => {
+                        if renderer_lock.fuzzy_mode {
+                            renderer_lock.fuzzy_submit();
+                            renderer_lock.render();
+                            continue;
+                        }
                         let input = renderer_lock.take_input();
                         renderer_lock.render();
                         if tx.blocking_send(InputEvent::Submit(input)).is_err() {
@@ -76,12 +86,20 @@ impl TerminalState {
                     }
                     // Ctrl + J (\n) - Move down
                     b'\n' => {
-                        renderer_lock.move_cursor_down();
+                        if renderer_lock.fuzzy_mode {
+                            renderer_lock.fuzzy_move_down();
+                        } else {
+                            renderer_lock.move_cursor_down();
+                        }
                         renderer_lock.render();
                     }
                     // Ctrl + K - Move up
                     0x0b => {
-                        renderer_lock.move_cursor_up();
+                        if renderer_lock.fuzzy_mode {
+                            renderer_lock.fuzzy_move_up();
+                        } else {
+                            renderer_lock.move_cursor_up();
+                        }
                         renderer_lock.render();
                     }
                     // Ctrl + U - Undo
@@ -92,6 +110,11 @@ impl TerminalState {
                     // Ctrl + R - Redo
                     0x12 => {
                         renderer_lock.redo();
+                        renderer_lock.render();
+                    }
+                    // Ctrl + O - Toggle full view
+                    0x0f => {
+                        renderer_lock.toggle_last_tool_result();
                         renderer_lock.render();
                     }
                     // Backspace / DEL
@@ -108,8 +131,13 @@ impl TerminalState {
                     0x1b => {
                         match get_escape_type(fd) {
                             EscapeType::Plain => {
-                                if tx.blocking_send(InputEvent::Cancel).is_err() {
-                                    break;
+                                if renderer_lock.fuzzy_mode {
+                                    renderer_lock.cancel_fuzzy();
+                                    renderer_lock.render();
+                                } else {
+                                    if tx.blocking_send(InputEvent::Cancel).is_err() {
+                                        break;
+                                    }
                                 }
                             }
                             EscapeType::AltEnter => {
@@ -117,11 +145,19 @@ impl TerminalState {
                                 renderer_lock.render();
                             }
                             EscapeType::ArrowUp => {
-                                renderer_lock.move_cursor_up();
+                                if renderer_lock.fuzzy_mode {
+                                    renderer_lock.fuzzy_move_up();
+                                } else {
+                                    renderer_lock.move_cursor_up();
+                                }
                                 renderer_lock.render();
                             }
                             EscapeType::ArrowDown => {
-                                renderer_lock.move_cursor_down();
+                                if renderer_lock.fuzzy_mode {
+                                    renderer_lock.fuzzy_move_down();
+                                } else {
+                                    renderer_lock.move_cursor_down();
+                                }
                                 renderer_lock.render();
                             }
                             EscapeType::ArrowLeft => {

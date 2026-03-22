@@ -41,7 +41,7 @@ impl Component for ToolCallComponent {
             return Buffer::empty();
         }
 
-        // 2 lines: empty top padding + "Read filename" line
+        // 2 lines: top padding row + "Read filename" line
         let height = 2u16;
         let mut buffer = Buffer::new(width, height);
 
@@ -51,14 +51,14 @@ impl Component for ToolCallComponent {
             Color::Default
         };
 
-        // Top padding line
+        // Top padding row
         buffer.fill_row(0, bg_color);
 
-        // "Read" in bold, then filename
+        // "Read" line
         buffer.fill_row(1, bg_color);
         buffer.write_str(1, 0, "  ", Color::Default, bg_color, Modifiers::default());
         buffer.write_str(1, 2, "Read", Color::Default, bg_color, Modifiers::bold());
-        buffer.write_str(1, 6, &format!(" {}", self.state.args), Color::Default, bg_color, Modifiers::default());
+        buffer.write_str(1, 7, &self.state.args, Color::Default, bg_color, Modifiers::default());
 
         buffer
     }

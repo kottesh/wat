@@ -20,6 +20,9 @@
 
 use std::io::{self, Write};
 
+use fuzzy_matcher::FuzzyMatcher;
+use fuzzy_matcher::skim::SkimMatcherV2;
+use ignore::WalkBuilder;
 use crate::component::{format_cell_style, Buffer, Component, ComponentId, Size};
 use crate::components::{
     ErrorComponent, ResponseComponent, ToolCallComponent, ToolResultComponent, UserInputComponent,
@@ -52,6 +55,7 @@ struct BashBlock {
     output_lines: Vec<String>,
     elapsed_secs: f64,
     status: BashStatus,
+    show_all: bool,
 }
 
 impl BashBlock {
@@ -61,13 +65,22 @@ impl BashBlock {
             output_lines: Vec::new(),
             elapsed_secs: 0.0,
             status: BashStatus::Running,
+            show_all: false,
         }
     }
 
     fn render_lines(&self, width: usize, use_colors: bool) -> Vec<String> {
+        let max_lines = 50;
+        let display_lines = if self.output_lines.len() > max_lines && !self.show_all {
+            // For bash, show the END
+            self.output_lines[self.output_lines.len() - max_lines..].to_vec()
+        } else {
+            self.output_lines.clone()
+        };
+
         if !use_colors {
             let mut lines = vec![format!("  $ {}", self.command)];
-            for l in &self.output_lines {
+            for l in &display_lines {
                 lines.push(format!("  {}", l));
             }
             let status = match &self.status {
@@ -87,7 +100,7 @@ impl BashBlock {
         };
         let reset = "\x1b[0m";
         let bold = "\x1b[1m";
-        let pad = |s: &str| " ".repeat(width.saturating_sub(s.len()));
+        let pad = |s: &str| " ".repeat(width.saturating_sub(crate::renderer::visible_width(s)));
 
         let mut lines = Vec::new();
         let empty = " ".repeat(width);
@@ -97,19 +110,37 @@ impl BashBlock {
 
         // command
         let cmd = format!("  $ {}", self.command);
-        lines.push(format!("{}{}{}{}{}{}", bg, bold, cmd, pad(&cmd), bold, reset));
+        let cmd_padded = format!("{}{}", cmd, pad(&cmd));
+        lines.push(format!("{}{}{}{}", bg, bold, cmd_padded, reset));
 
         // gap
         lines.push(format!("{}{}{}", bg, empty, reset));
 
         // output lines
-        for l in &self.output_lines {
+        for l in &display_lines {
             let content = format!("  {}", l);
-            lines.push(format!("{}{}{}{}", bg, content, pad(&content), reset));
+            // Truncate content to width to prevent wrapping
+            let truncated = if crate::renderer::visible_width(&content) > width {
+                let mut t = String::new();
+                let mut w = 0;
+                for c in content.chars() {
+                    let cw = 1; // Simplification
+                    if w + cw > width.saturating_sub(3) {
+                        t.push_str("...");
+                        break;
+                    }
+                    t.push(c);
+                    w += cw;
+                }
+                t
+            } else {
+                content
+            };
+            lines.push(format!("{}{}{}{}", bg, truncated, pad(&truncated), reset));
         }
 
         // footer gap
-        if !self.output_lines.is_empty() {
+        if !display_lines.is_empty() {
             lines.push(format!("{}{}{}", bg, empty, reset));
         }
 
@@ -131,8 +162,8 @@ impl BashBlock {
 // ── Render items (history) ──────────────────────────────────────────────────
 
 enum RenderItem {
-    /// A completed component rendered via the Buffer system
-    Buffer(Vec<String>),
+    /// A completed component
+    Component(Box<dyn crate::component::Component>),
     /// A completed bash block
     Bash(BashBlock),
 }
@@ -169,6 +200,19 @@ pub struct DifferentialRenderer {
     /// Hardware cursor column position
     cursor_col: usize,
 
+    /// Is fuzzy file search active?
+    pub fuzzy_mode: bool,
+    /// Cached list of all files for fuzzy search
+    fuzzy_files: Vec<String>,
+    /// Currently filtered results
+    fuzzy_results: Vec<String>,
+    /// Index of the selected result
+    fuzzy_selection: usize,
+    /// Query string for fuzzy search
+    fuzzy_query: String,
+    /// Was fuzzy mode triggered by typing '@'?
+    fuzzy_triggered_by_at: bool,
+
     terminal_size: Size,
     use_colors: bool,
 }
@@ -193,6 +237,12 @@ impl DifferentialRenderer {
             previous_lines: Vec::new(),
             cursor_row: 0,
             cursor_col: 0,
+            fuzzy_mode: false,
+            fuzzy_files: Vec::new(),
+            fuzzy_results: Vec::new(),
+            fuzzy_selection: 0,
+            fuzzy_query: String::new(),
+            fuzzy_triggered_by_at: false,
             terminal_size,
             use_colors,
         }
@@ -201,6 +251,117 @@ impl DifferentialRenderer {
     pub fn update_size(&mut self) {
         if let Ok((w, h)) = crossterm::terminal::size() {
             self.terminal_size = Size::new(w, h);
+        }
+    }
+
+    // ── Fuzzy search ────────────────────────────────────────────────────────
+    
+    pub fn toggle_fuzzy_mode(&mut self) {
+        self.fuzzy_mode = !self.fuzzy_mode;
+        if self.fuzzy_mode {
+            self.fuzzy_query.clear();
+            self.fuzzy_selection = 0;
+            self.fuzzy_triggered_by_at = false;
+            if self.fuzzy_files.is_empty() {
+                self.load_fuzzy_files();
+            }
+            self.update_fuzzy_results();
+        }
+    }
+    
+    pub fn trigger_fuzzy_at(&mut self) {
+        self.fuzzy_mode = true;
+        self.fuzzy_query.clear();
+        self.fuzzy_selection = 0;
+        self.fuzzy_triggered_by_at = true;
+        if self.fuzzy_files.is_empty() {
+            self.load_fuzzy_files();
+        }
+        self.update_fuzzy_results();
+    }
+
+    pub fn cancel_fuzzy(&mut self) {
+        if self.fuzzy_mode {
+            self.fuzzy_mode = false;
+            if self.fuzzy_triggered_by_at {
+                let mut text = String::from("@");
+                text.push_str(&self.fuzzy_query);
+                
+                let row = self.input_cursor_row;
+                let col = self.input_cursor_col;
+                self.current_input[row].insert_str(col, &text);
+                self.input_cursor_col += text.len();
+            }
+            self.fuzzy_query.clear();
+        }
+    }
+    
+    fn load_fuzzy_files(&mut self) {
+        let mut files = Vec::new();
+        // Ignore .git, target, node_modules automatically via ignore crate
+        let walker = WalkBuilder::new("./").hidden(true).build();
+        for result in walker {
+            if let Ok(entry) = result {
+                if entry.file_type().map_or(false, |ft| ft.is_file()) {
+                    let path = entry.path().display().to_string();
+                    let clean_path = path.strip_prefix("./").unwrap_or(&path).to_string();
+                    files.push(clean_path);
+                }
+            }
+        }
+        self.fuzzy_files = files;
+    }
+    
+    pub fn update_fuzzy_results(&mut self) {
+        if self.fuzzy_query.is_empty() {
+            self.fuzzy_results = self.fuzzy_files.iter().take(10).cloned().collect();
+            self.fuzzy_selection = 0;
+            return;
+        }
+        
+        let matcher = SkimMatcherV2::default();
+        let mut matched: Vec<(String, i64)> = self.fuzzy_files.iter()
+            .filter_map(|file| matcher.fuzzy_match(file, &self.fuzzy_query).map(|score| (file.clone(), score)))
+            .collect();
+            
+        matched.sort_by(|a, b| b.1.cmp(&a.1));
+        self.fuzzy_results = matched.into_iter().take(10).map(|(s, _)| s).collect();
+        self.fuzzy_selection = 0;
+    }
+    
+    pub fn fuzzy_submit(&mut self) {
+        if self.fuzzy_mode {
+            if self.fuzzy_results.is_empty() {
+                self.cancel_fuzzy();
+                return;
+            }
+            if let Some(selected) = self.fuzzy_results.get(self.fuzzy_selection) {
+                // Wrap in quotes if there's a space
+                let insert_text = if selected.contains(' ') {
+                    format!("\"{}\" ", selected)
+                } else {
+                    format!("{} ", selected)
+                };
+                
+                let row = self.input_cursor_row;
+                let col = self.input_cursor_col;
+                self.current_input[row].insert_str(col, &insert_text);
+                self.input_cursor_col += insert_text.len();
+            }
+            self.fuzzy_mode = false;
+            self.fuzzy_query.clear();
+        }
+    }
+    
+    pub fn fuzzy_move_up(&mut self) {
+        if self.fuzzy_selection > 0 {
+            self.fuzzy_selection -= 1;
+        }
+    }
+    
+    pub fn fuzzy_move_down(&mut self) {
+        if self.fuzzy_selection + 1 < self.fuzzy_results.len() {
+            self.fuzzy_selection += 1;
         }
     }
 
@@ -233,6 +394,15 @@ impl DifferentialRenderer {
     }
 
     pub fn push_input_char(&mut self, c: char) {
+        if self.fuzzy_mode {
+            self.fuzzy_query.push(c);
+            self.update_fuzzy_results();
+            return;
+        }
+        if c == '@' {
+            self.trigger_fuzzy_at();
+            return;
+        }
         self.save_undo();
         let row = self.input_cursor_row;
         let col = self.input_cursor_col;
@@ -241,6 +411,15 @@ impl DifferentialRenderer {
     }
 
     pub fn pop_input_char(&mut self) {
+        if self.fuzzy_mode {
+            if self.fuzzy_query.is_empty() {
+                self.fuzzy_mode = false;
+            } else {
+                self.fuzzy_query.pop();
+                self.update_fuzzy_results();
+            }
+            return;
+        }
         self.save_undo();
         let row = self.input_cursor_row;
         let col = self.input_cursor_col;
@@ -339,30 +518,21 @@ impl DifferentialRenderer {
         self.update_size();
         let id = next_component_id();
         let comp = UserInputComponent::new(id, content, self.use_colors);
-        let lines = self.component_to_lines(&comp);
-        if !lines.is_empty() {
-            self.items.push(RenderItem::Buffer(lines));
-        }
+        self.items.push(RenderItem::Component(Box::new(comp)));
     }
 
     pub fn add_response(&mut self, content: String) {
         self.update_size();
         let id = next_component_id();
         let comp = ResponseComponent::new(id, content, self.use_colors);
-        let lines = self.component_to_lines(&comp);
-        if !lines.is_empty() {
-            self.items.push(RenderItem::Buffer(lines));
-        }
+        self.items.push(RenderItem::Component(Box::new(comp)));
     }
 
     pub fn add_tool_call(&mut self, tool_name: String, args: String) {
         self.update_size();
         let id = next_component_id();
         let comp = ToolCallComponent::new(id, tool_name, args, self.use_colors);
-        let lines = self.component_to_lines(&comp);
-        if !lines.is_empty() {
-            self.items.push(RenderItem::Buffer(lines));
-        }
+        self.items.push(RenderItem::Component(Box::new(comp)));
     }
 
     pub fn add_tool_result(
@@ -378,20 +548,14 @@ impl DifferentialRenderer {
         let comp = ToolResultComponent::new(
             id, tool_name, output, duration_secs, success, command, self.use_colors,
         );
-        let lines = self.component_to_lines(&comp);
-        if !lines.is_empty() {
-            self.items.push(RenderItem::Buffer(lines));
-        }
+        self.items.push(RenderItem::Component(Box::new(comp)));
     }
 
     pub fn add_error(&mut self, message: String) {
         self.update_size();
         let id = next_component_id();
         let comp = ErrorComponent::new(id, message, self.use_colors);
-        let lines = self.component_to_lines(&comp);
-        if !lines.is_empty() {
-            self.items.push(RenderItem::Buffer(lines));
-        }
+        self.items.push(RenderItem::Component(Box::new(comp)));
     }
 
     // ── Bash block lifecycle ─────────────────────────────────────────────────
@@ -427,13 +591,9 @@ impl DifferentialRenderer {
         }
     }
 
-    /// Finalise the streaming response — moves it to history.
     pub fn finalize_response(&mut self) {
         if let Some(resp) = self.current_response.take() {
-            let lines = self.component_to_lines(&resp);
-            if !lines.is_empty() {
-                self.items.push(RenderItem::Buffer(lines));
-            }
+            self.items.push(RenderItem::Component(Box::new(resp)));
         }
     }
 
@@ -450,6 +610,42 @@ impl DifferentialRenderer {
         }
     }
 
+    // ── Toggle show all ──────────────────────────────────────────────────────
+
+    pub fn toggle_last_tool_result(&mut self) {
+        let mut toggled = false;
+        for item in self.items.iter_mut().rev() {
+            match item {
+                RenderItem::Component(comp) => {
+                    if comp.toggle_show_all() {
+                        toggled = true;
+                        break;
+                    }
+                }
+                RenderItem::Bash(bash) => {
+                    bash.show_all = !bash.show_all;
+                    toggled = true;
+                    break;
+                }
+            }
+        }
+        
+        // If we toggled something, we need a full redraw because the height
+        // change might exceed the terminal's visible height, breaking diffing.
+        if toggled {
+            self.force_redraw();
+        }
+    }
+
+    /// Force a complete clear and redraw of the screen
+    pub fn force_redraw(&mut self) {
+        print!("\x1b[2J\x1b[H"); // Clear screen and move to top
+        let _ = io::stdout().flush();
+        self.previous_lines.clear();
+        self.cursor_row = 0;
+        self.cursor_col = 0;
+    }
+
     // ── Core render ──────────────────────────────────────────────────────────
 
     /// Produce the complete list of terminal lines and the logical cursor position.
@@ -458,12 +654,30 @@ impl DifferentialRenderer {
         let mut lines: Vec<String> = Vec::new();
 
         // Completed items
-        for item in &self.items {
+        for (i, item) in self.items.iter().enumerate() {
+            let next_is_result = if i + 1 < self.items.len() {
+                match &self.items[i+1] {
+                    RenderItem::Component(comp) => {
+                        let temp_lines = self.component_to_lines(comp.as_ref());
+                        temp_lines.first().map(|l| l.contains("\x1b[48;2;") || l.contains("\x1b[48;5;")).unwrap_or(false)
+                    }
+                    _ => false,
+                }
+            } else {
+                false
+            };
+
             match item {
-                RenderItem::Buffer(item_lines) => {
+                RenderItem::Component(comp) => {
+                    let item_lines = self.component_to_lines(comp.as_ref());
                     if !item_lines.is_empty() {
-                        lines.extend_from_slice(item_lines);
-                        lines.push(String::new()); // blank separator
+                        lines.extend_from_slice(&item_lines);
+                        
+                        // Skip blank separator between ToolCall and ToolResult for a unified block
+                        let is_call = item_lines.iter().any(|l| l.contains("Read"));
+                        if !(is_call && next_is_result) {
+                            lines.push(String::new()); // blank separator
+                        }
                     }
                 }
                 RenderItem::Bash(bash) => {
@@ -511,21 +725,144 @@ impl DifferentialRenderer {
 
         lines.push(border.clone()); // top border
 
+        // Render fuzzy file search results if active (inside the border)
+        if self.fuzzy_mode {
+            let dim = if self.use_colors { "\x1b[38;5;245m" } else { "" };
+            let sel_fg = if self.use_colors { "\x1b[1m\x1b[36m" } else { "" }; // Bold Cyan
+            let reset = "\x1b[0m";
+            
+            // Header
+            lines.push(format!("  {}Find file: {}{}", dim, self.fuzzy_query, reset));
+            
+            for (idx, res) in self.fuzzy_results.iter().enumerate() {
+                let is_selected = idx == self.fuzzy_selection;
+                let (prefix, color) = if is_selected {
+                    ("  > ", sel_fg)
+                } else {
+                    ("    ", dim)
+                };
+                
+                let raw_text = format!("{}{}", prefix, res);
+                
+                // Truncate to prevent wrapping
+                let mut t = String::new();
+                let mut w = 0;
+                for c in raw_text.chars() {
+                    let cw = 1;
+                    if w + cw > width.saturating_sub(3) {
+                        t.push_str("...");
+                        break;
+                    }
+                    t.push(c);
+                    w += cw;
+                }
+                
+                lines.push(format!("{}{}{}", color, t, reset));
+            }
+            
+            if self.fuzzy_results.is_empty() {
+                lines.push(format!("    {}No results found{}", dim, reset));
+            }
+            
+            // Blank separator before the actual input text
+            lines.push(String::new());
+        }
+
         // Multi-line input area (always visible)
         let mut cursor_row = 0;
         let mut cursor_col = 0;
 
-        for (i, line) in self.current_input.iter().enumerate() {
-            lines.push(format!("  {}", line));
-            if i == self.input_cursor_row {
-                cursor_row = lines.len() - 1;
-                // Calculate cursor column based on actual chars before input_cursor_col
-                let prefix: String = line.chars().take(self.input_cursor_col).collect();
-                cursor_col = crate::renderer::visible_width(&prefix) + 2;
+        let input_width = width.saturating_sub(4); // "  " prefix + some padding
+        if input_width == 0 {
+            // Fallback for extremely narrow terminals
+            for (i, line) in self.current_input.iter().enumerate() {
+                lines.push(format!("  {}", line));
+                if i == self.input_cursor_row {
+                    cursor_row = lines.len() - 1;
+                    let prefix: String = line.chars().take(self.input_cursor_col).collect();
+                    cursor_col = crate::renderer::visible_width(&prefix) + 2;
+                }
+            }
+        } else {
+            // Render with wrapping
+            for (i, line) in self.current_input.iter().enumerate() {
+                let is_cursor_line = i == self.input_cursor_row;
+                
+                if line.is_empty() {
+                    lines.push("  ".to_string());
+                    if is_cursor_line {
+                        cursor_row = lines.len() - 1;
+                        cursor_col = 2;
+                    }
+                    continue;
+                }
+
+                // Wrap the line
+                let mut current_visual_line = String::new();
+                let mut current_visual_width = 0;
+                let mut char_idx = 0;
+                
+                let mut visual_lines = Vec::new();
+                let mut cursor_mapped = false;
+
+                for c in line.chars() {
+                    if is_cursor_line && char_idx == self.input_cursor_col {
+                        cursor_row = lines.len() + visual_lines.len();
+                        cursor_col = current_visual_width + 2;
+                        cursor_mapped = true;
+                    }
+
+                    // Simple character width (assuming 1 for now, could be improved)
+                    let cw = 1;
+                    
+                    if current_visual_width + cw > input_width {
+                        visual_lines.push(current_visual_line.clone());
+                        current_visual_line.clear();
+                        current_visual_width = 0;
+                    }
+                    
+                    current_visual_line.push(c);
+                    current_visual_width += cw;
+                    char_idx += 1;
+                }
+                
+                if is_cursor_line && !cursor_mapped {
+                    // Cursor is at the very end of the logical line
+                    if current_visual_width >= input_width {
+                        // Cursor needs to wrap to the next visual line
+                        visual_lines.push(current_visual_line.clone());
+                        current_visual_line.clear();
+                        cursor_row = lines.len() + visual_lines.len();
+                        cursor_col = 2;
+                    } else {
+                        cursor_row = lines.len() + visual_lines.len();
+                        cursor_col = current_visual_width + 2;
+                    }
+                }
+                
+                if !current_visual_line.is_empty() {
+                    visual_lines.push(current_visual_line);
+                }
+
+                for vl in visual_lines {
+                    lines.push(format!("  {}", vl));
+                }
             }
         }
 
         lines.push(border); // bottom border
+
+        // Cap the output to the terminal height to prevent vertical scrolling desync
+        let max_height = self.terminal_size.height.saturating_sub(1) as usize;
+        if lines.len() > max_height {
+            let skip = lines.len() - max_height;
+            lines.drain(0..skip);
+            if cursor_row >= skip {
+                cursor_row -= skip;
+            } else {
+                cursor_row = 0;
+            }
+        }
 
         (lines, cursor_row, cursor_col)
     }
@@ -617,7 +954,7 @@ impl DifferentialRenderer {
 
     // ── Helpers ──────────────────────────────────────────────────────────────
 
-    fn component_to_lines<C: crate::component::Component>(&self, comp: &C) -> Vec<String> {
+    fn component_to_lines<C: crate::component::Component + ?Sized>(&self, comp: &C) -> Vec<String> {
         let buf = comp.render(self.terminal_size.width);
         self.buffer_to_lines(&buf)
     }
@@ -674,14 +1011,18 @@ impl DifferentialRenderer {
 pub fn visible_width(s: &str) -> usize {
     let mut width = 0;
     let mut in_esc = false;
+    let mut in_bracket = false;
     for c in s.chars() {
         if c == '\x1b' {
             in_esc = true;
             continue;
         }
         if in_esc {
-            if c.is_ascii_alphabetic() || c == 'm' {
+            if c == '[' {
+                in_bracket = true;
+            } else if c.is_ascii_alphabetic() || c == 'm' {
                 in_esc = false;
+                in_bracket = false;
             }
             continue;
         }

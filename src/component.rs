@@ -246,4 +246,7 @@ pub trait Component: std::fmt::Debug + Send {
     /// Get a mutable reference to self as Any for downcasting
     #[allow(dead_code)]
     fn as_any_mut(&mut self) -> &mut dyn Any;
+
+    /// Toggle showing all lines (if applicable). Returns true if toggled.
+    fn toggle_show_all(&mut self) -> bool { false }
 }
