@@ -1,9 +1,7 @@
-//! Main agent – conversation loop with inline rendering.
+//! Main agent — conversation loop with differential inline rendering.
 
-use std::io::{self, Write};
-use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+use std::io;
 use std::sync::mpsc;
-use std::thread;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -39,21 +37,18 @@ impl Agent {
     }
 
     async fn main_loop(&mut self) -> Result<()> {
-        // Draw the initial input box — every subsequent render keeps it at the bottom.
-        self.renderer.draw_input_box();
+        // First render draws the empty input box
+        self.renderer.render();
 
         loop {
-            self.renderer.update_size();
-
-            match self.terminal.read_line()? {
+            match self.terminal.read_line(&mut self.renderer)? {
                 ReadResult::Escape => {
-                    // ESC while idle: clear any half-typed text, stay in loop
-                    self.renderer.clear_input_line();
+                    // ESC while idle — clear any partial input, stay in loop
+                    self.renderer.render();
                     continue;
                 }
                 ReadResult::Input(raw) => {
                     let input = raw.trim().to_string();
-
                     if input.is_empty() {
                         continue;
                     }
@@ -61,10 +56,9 @@ impl Agent {
                         break;
                     }
 
-                    // Commit the typed text as a styled UserInput component.
-                    // render_component moves above the input box, prints the
-                    // component, then redraws the input box below.
+                    // Commit the typed line as a styled UserInput component
                     self.renderer.add_user_input(input.clone());
+                    self.renderer.render();
 
                     if input == "clear" {
                         self.history.clear();
@@ -73,6 +67,7 @@ impl Agent {
 
                     if let Err(e) = self.agent_loop(&input).await {
                         self.renderer.add_error(e.to_string());
+                        self.renderer.render();
                     }
                 }
             }
@@ -89,50 +84,45 @@ impl Agent {
             let mut messages = vec![Message::system(&system)];
             messages.extend(self.history.clone());
 
-            // ── Spinner on the input line while waiting for LLM ──────────
-            let spinner_running = Arc::new(AtomicBool::new(true));
-            let sr = spinner_running.clone();
-            let use_colors = self.renderer.use_colors();
+            // ── LLM query with animated spinner on the input line ────────────
+            let frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+            let mut idx = 0usize;
 
-            let spinner_handle = thread::spawn(move || {
-                let frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-                let mut idx = 0usize;
-                while sr.load(Ordering::Relaxed) {
-                    if use_colors {
-                        // Write to input line: up 2 → print → clear EOL → down 2
-                        print!(
-                            "\x1b[2F\r\x1b[96m{}\x1b[0m \x1b[2mThinking...\x1b[0m\x1b[K\x1b[2B\r",
-                            frames[idx]
-                        );
-                    } else {
-                        print!("\x1b[2F\r{} Thinking...\x1b[K\x1b[2B\r", frames[idx]);
+            let query_fut = self.llm_client.query(messages);
+            tokio::pin!(query_fut);
+
+            let response = loop {
+                tokio::select! {
+                    r = &mut query_fut => break r,
+                    _ = tokio::time::sleep(Duration::from_millis(80)) => {
+                        let frame = frames[idx];
+                        let text = if self.renderer.use_colors() {
+                            format!("  \x1b[96m{}\x1b[0m \x1b[2mThinking...\x1b[0m", frame)
+                        } else {
+                            format!("  {} Thinking...", frame)
+                        };
+                        self.renderer.set_spinner(text);
+                        self.renderer.render();
+                        idx = (idx + 1) % frames.len();
                     }
-                    let _ = io::stdout().flush();
-                    idx = (idx + 1) % frames.len();
-                    thread::sleep(Duration::from_millis(80));
                 }
-                // Clear input line
-                print!("\x1b[2F\r\x1b[K\x1b[2B\r");
-                let _ = io::stdout().flush();
-            });
+            };
 
-            let response = self.llm_client.query(messages).await;
-
-            spinner_running.store(false, Ordering::Relaxed);
-            let _ = spinner_handle.join();
-
+            self.renderer.clear_spinner();
             let response = response?;
             let tools = tools::parse_tools(&response.content);
 
             if tools.is_empty() {
                 self.history.push(Message::assistant(&response.content));
                 self.renderer.add_response(response.content);
+                self.renderer.render();
                 break;
             }
 
-            let display_response = tools::strip_tool_blocks(&response.content);
-            if !display_response.is_empty() {
-                self.renderer.add_response(display_response);
+            let display = tools::strip_tool_blocks(&response.content);
+            if !display.is_empty() {
+                self.renderer.add_response(display);
+                self.renderer.render();
             }
             self.history.push(Message::assistant(&response.content));
 
@@ -142,51 +132,33 @@ impl Agent {
                 match tool {
                     Tool::Bash { command } => {
                         if is_dangerous(command) {
-                            self.renderer.add_error(format!("Refusing dangerous command: {}", command));
-                            all_results.push_str(&format!("Command refused (dangerous): {}\n", command));
+                            self.renderer.add_error(format!(
+                                "Refusing dangerous command: {}",
+                                command
+                            ));
+                            self.renderer.render();
+                            all_results
+                                .push_str(&format!("Command refused: {}\n", command));
                             continue;
                         }
 
-                        // Show "esc to cancel" hint on the input line
-                        if self.renderer.use_colors() {
-                            self.renderer.update_input_line(
-                                "\x1b[2m  esc to cancel\x1b[0m"
-                            );
+                        // Show hint on the input line
+                        let hint = if self.renderer.use_colors() {
+                            "  \x1b[2mesc to cancel\x1b[0m".to_string()
                         } else {
-                            self.renderer.update_input_line("  esc to cancel");
-                        }
+                            "  esc to cancel".to_string()
+                        };
+                        self.renderer.set_input_hint(hint);
 
-                        // Print bash header above the input box
-                        self.renderer.print_bash_header(command);
+                        // Start bash block and do initial render
+                        self.renderer.start_bash(command);
+                        self.renderer.render();
 
                         let (rx, _handle) = execute_tool_streaming(command);
                         let start = std::time::Instant::now();
-                        let mut output_lines: Vec<String> = Vec::new();
                         let mut exit_code: Option<i32> = None;
                         let mut cancelled = false;
 
-                        // Live elapsed-time updater on the input line
-                        let timer_alive = Arc::new(AtomicBool::new(true));
-                        let ta = timer_alive.clone();
-                        let timer_start = start;
-                        let use_col = self.renderer.use_colors();
-                        let timer_thread = thread::spawn(move || {
-                            while ta.load(Ordering::Relaxed) {
-                                let secs = timer_start.elapsed().as_secs_f64();
-                                if use_col {
-                                    print!(
-                                        "\x1b[2F\r\x1b[2m  esc to cancel  {:.1}s\x1b[0m\x1b[K\x1b[2B\r",
-                                        secs
-                                    );
-                                } else {
-                                    print!("\x1b[2F\r  esc to cancel  {:.1}s\x1b[K\x1b[2B\r", secs);
-                                }
-                                let _ = io::stdout().flush();
-                                thread::sleep(Duration::from_millis(100));
-                            }
-                        });
-
-                        // Streaming loop — also checks stdin for ESC
                         loop {
                             // Non-blocking ESC check
                             if stdin_has_esc() {
@@ -196,57 +168,59 @@ impl Agent {
 
                             match rx.recv_timeout(Duration::from_millis(50)) {
                                 Ok(StreamEvent::Stdout(line)) => {
-                                    self.renderer.print_output_line(&line);
-                                    output_lines.push(line);
+                                    self.renderer.push_bash_output(line);
+                                    self.renderer.render();
                                 }
                                 Ok(StreamEvent::Stderr(line)) => {
-                                    self.renderer.print_output_line(&line);
-                                    output_lines.push(line);
+                                    self.renderer.push_bash_output(line);
+                                    self.renderer.render();
                                 }
                                 Ok(StreamEvent::Done { exit_code: ec }) => {
                                     exit_code = ec;
                                     break;
                                 }
-                                Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                                Err(mpsc::RecvTimeoutError::Timeout) => {
+                                    // Update elapsed timer on input line
+                                    let secs = start.elapsed().as_secs_f64();
+                                    let hint = if self.renderer.use_colors() {
+                                        format!(
+                                            "  \x1b[2mesc to cancel  {:.1}s\x1b[0m",
+                                            secs
+                                        )
+                                    } else {
+                                        format!("  esc to cancel  {:.1}s", secs)
+                                    };
+                                    self.renderer.set_input_hint(hint);
+                                    self.renderer.set_bash_elapsed(secs);
+                                    self.renderer.render();
+                                }
                                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
                             }
                         }
 
-                        timer_alive.store(false, Ordering::Relaxed);
-                        let _ = timer_thread.join();
-
                         let duration = start.elapsed().as_secs_f64();
                         let success = !cancelled && exit_code == Some(0);
 
-                        // Clear the hint/timer from the input line
-                        self.renderer.clear_input_line();
+                        self.renderer.clear_input_hint();
+                        self.renderer.finalize_bash(duration, success, cancelled);
+                        self.renderer.render();
 
-                        // Repaint the full bash block with the final colour
-                        self.renderer.finalize_bash_block(
-                            command,
-                            &output_lines,
-                            duration,
-                            success,
-                            cancelled,
-                        );
+                        let output_text = self.renderer.last_bash_output();
 
                         if cancelled {
                             all_results.push_str(&format!(
                                 "$ {}\n{}\n(cancelled)\n",
-                                command,
-                                output_lines.join("\n")
+                                command, output_text
                             ));
-                            break; // stop executing further tools in this turn
+                            break;
                         } else {
-                            all_results.push_str(&format!(
-                                "$ {}\n{}\n",
-                                command,
-                                output_lines.join("\n")
-                            ));
+                            all_results
+                                .push_str(&format!("$ {}\n{}\n", command, output_text));
                         }
                     }
                     Tool::ReadFile { path } => {
                         self.renderer.add_tool_call("read_file".to_string(), path.clone());
+                        self.renderer.render();
                         let result = execute_tool(tool)?;
                         self.renderer.add_tool_result(
                             "read_file".to_string(),
@@ -255,13 +229,16 @@ impl Agent {
                             result.success,
                             None,
                         );
-                        all_results.push_str(&format!("File: {}\n{}\n", path, result.output));
+                        self.renderer.render();
+                        all_results
+                            .push_str(&format!("File: {}\n{}\n", path, result.output));
                     }
                 }
             }
 
             if !all_results.is_empty() {
-                self.history.push(Message::user(&format!("Tool output:\n{}", all_results)));
+                self.history
+                    .push(Message::user(&format!("Tool output:\n{}", all_results)));
             }
         }
 
@@ -288,19 +265,16 @@ When asked to do something, use the appropriate tool. Show the tool call you're 
     }
 }
 
-/// Non-blocking check: returns true if stdin has a byte available AND it is ESC (0x1b).
-/// If a non-ESC byte is present it is silently consumed (it's from an arrow key, etc.).
+/// Non-blocking check: is there an ESC byte (0x1b) waiting on stdin?
 fn stdin_has_esc() -> bool {
     use std::os::unix::io::AsRawFd;
     let fd = io::stdin().as_raw_fd();
     let mut pfd = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
     let ret = unsafe { libc::poll(&mut pfd as *mut _, 1, 0) };
-    if ret > 0 && (pfd.revents & libc::POLLIN) != 0 {
-        let mut buf = [0u8; 1];
-        let n = unsafe { libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, 1) };
-        if n == 1 && buf[0] == 0x1b {
-            return true;
-        }
+    if ret > 0 && pfd.revents & libc::POLLIN != 0 {
+        let mut b = [0u8; 1];
+        let n = unsafe { libc::read(fd, b.as_mut_ptr() as *mut libc::c_void, 1) };
+        return n == 1 && b[0] == 0x1b;
     }
     false
 }

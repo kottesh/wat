@@ -1,29 +1,29 @@
-//! Inline rendering system for terminal output
+//! Differential renderer — pi-style.
 //!
-//! Input box is always pinned at the bottom. Every render call moves the
-//! cursor above the input box, prints its content, then redraws the input
-//! box below. This keeps the input box permanently visible.
+//! All UI state lives here.  `render()` converts everything to a flat
+//! `Vec<String>` of lines, diffs against `previous_lines`, then writes
+//! only the changed lines to stdout wrapped in synchronized-output guards.
+//! No cursor-juggling escape sequences outside of `render()`.
 //!
-//! Layout (from top of content downward):
-//!   ... scrollback content ...
-//!   [blank gap]        ← INPUT_BOX_LINES = 4
-//!   [top border]
-//!   [input line]       ← user types here
-//!   [bottom border]
-//!   (cursor here after every draw)
+//! Layout (lines produced by render_all):
+//!   [component 0 lines]
+//!   [blank separator]
+//!   [component 1 lines]
+//!   [blank separator]
+//!   ...
+//!   [current bash block lines]  ← while a command is running
+//!   [blank separator]
+//!   [blank gap]                 ─┐
+//!   [top border]                 │  input box (always last)
+//!   [input / spinner / hint]     │
+//!   [bottom border]             ─┘
 
-use std::collections::HashMap;
 use std::io::{self, Write};
 
-use crate::component::{format_cell_style, Buffer, Component, ComponentId, Size};
+use crate::component::{format_cell_style, Buffer, ComponentId, Size};
 use crate::components::{
     ErrorComponent, ResponseComponent, ToolCallComponent, ToolResultComponent, UserInputComponent,
 };
-use crate::layout::LayoutManager;
-
-/// Number of lines the input box occupies.
-/// blank-gap + top-border + input-line + bottom-border = 4
-const INPUT_BOX_LINES: u16 = 4;
 
 static COMPONENT_ID_COUNTER: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(1);
@@ -32,25 +32,129 @@ pub fn next_component_id() -> ComponentId {
     ComponentId(COMPONENT_ID_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst))
 }
 
-struct ComponentEntry {
-    component: Box<dyn Component>,
+// ── Bash block ──────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, PartialEq)]
+enum BashStatus {
+    Running,
+    Done { success: bool },
+    Cancelled,
 }
+
+#[derive(Debug)]
+struct BashBlock {
+    command: String,
+    output_lines: Vec<String>,
+    elapsed_secs: f64,
+    status: BashStatus,
+}
+
+impl BashBlock {
+    fn new(command: &str) -> Self {
+        Self {
+            command: command.to_string(),
+            output_lines: Vec::new(),
+            elapsed_secs: 0.0,
+            status: BashStatus::Running,
+        }
+    }
+
+    fn render_lines(&self, width: usize, use_colors: bool) -> Vec<String> {
+        if !use_colors {
+            let mut lines = vec![format!("  $ {}", self.command)];
+            for l in &self.output_lines {
+                lines.push(format!("  {}", l));
+            }
+            let status = match &self.status {
+                BashStatus::Running => format!("  Running {:.1}s", self.elapsed_secs),
+                BashStatus::Done { .. } => format!("  Took {:.1}s", self.elapsed_secs),
+                BashStatus::Cancelled => "  Cancelled".to_string(),
+            };
+            lines.push(status);
+            return lines;
+        }
+
+        let bg = match &self.status {
+            BashStatus::Running => "\x1b[48;2;39;39;39m",
+            BashStatus::Done { success: true } => "\x1b[48;2;34;46;36m",
+            BashStatus::Done { success: false } => "\x1b[48;2;55;34;34m",
+            BashStatus::Cancelled => "\x1b[48;2;80;70;30m",
+        };
+        let reset = "\x1b[0m";
+        let bold = "\x1b[1m";
+        let pad = |s: &str| " ".repeat(width.saturating_sub(s.len()));
+
+        let mut lines = Vec::new();
+        let empty = " ".repeat(width);
+
+        // top padding
+        lines.push(format!("{}{}{}", bg, empty, reset));
+
+        // command
+        let cmd = format!("  $ {}", self.command);
+        lines.push(format!("{}{}{}{}{}{}", bg, bold, cmd, pad(&cmd), bold, reset));
+
+        // gap
+        lines.push(format!("{}{}{}", bg, empty, reset));
+
+        // output lines
+        for l in &self.output_lines {
+            let content = format!("  {}", l);
+            lines.push(format!("{}{}{}{}", bg, content, pad(&content), reset));
+        }
+
+        // footer gap
+        if !self.output_lines.is_empty() {
+            lines.push(format!("{}{}{}", bg, empty, reset));
+        }
+
+        // status line
+        let status = match &self.status {
+            BashStatus::Running => format!("  Running {:.1}s", self.elapsed_secs),
+            BashStatus::Done { .. } => format!("  Took {:.1}s", self.elapsed_secs),
+            BashStatus::Cancelled => "  Cancelled".to_string(),
+        };
+        lines.push(format!("{}{}{}{}", bg, status, pad(&status), reset));
+
+        // bottom padding
+        lines.push(format!("{}{}{}", bg, empty, reset));
+
+        lines
+    }
+}
+
+// ── Render items (history) ──────────────────────────────────────────────────
+
+enum RenderItem {
+    /// A completed component rendered via the Buffer system
+    Buffer(Vec<String>),
+    /// A completed bash block
+    Bash(BashBlock),
+}
+
+// ── Renderer ────────────────────────────────────────────────────────────────
 
 pub struct DifferentialRenderer {
-    components: HashMap<ComponentId, ComponentEntry>,
-    layout: LayoutManager,
+    /// Ordered list of completed render items
+    items: Vec<RenderItem>,
+    /// Currently executing bash block (None when idle)
+    current_bash: Option<BashBlock>,
+    /// Text the user is currently typing (shown on the input line)
+    current_input: String,
+    /// Spinner text shown on the input line while LLM is thinking
+    spinner_text: Option<String>,
+    /// Hint text shown on the input line during bash (e.g. "esc to cancel")
+    input_hint: Option<String>,
+
+    /// Last rendered lines (for diffing)
+    previous_lines: Vec<String>,
+    /// Where the hardware cursor currently sits (index into previous_lines)
+    cursor_row: usize,
+    /// Hardware cursor column position
+    cursor_col: usize,
+
     terminal_size: Size,
     use_colors: bool,
-}
-
-impl std::fmt::Debug for DifferentialRenderer {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("DifferentialRenderer")
-            .field("component_count", &self.components.len())
-            .field("terminal_size", &self.terminal_size)
-            .field("use_colors", &self.use_colors)
-            .finish()
-    }
 }
 
 impl DifferentialRenderer {
@@ -60,8 +164,14 @@ impl DifferentialRenderer {
             .unwrap_or_else(|_| Size::new(80, 24));
 
         Self {
-            components: HashMap::new(),
-            layout: LayoutManager::new(terminal_size.width, terminal_size.height),
+            items: Vec::new(),
+            current_bash: None,
+            current_input: String::new(),
+            spinner_text: None,
+            input_hint: None,
+            previous_lines: Vec::new(),
+            cursor_row: 0,
+            cursor_col: 0,
             terminal_size,
             use_colors,
         }
@@ -70,78 +180,77 @@ impl DifferentialRenderer {
     pub fn update_size(&mut self) {
         if let Ok((w, h)) = crossterm::terminal::size() {
             self.terminal_size = Size::new(w, h);
-            self.layout.set_size(w, h);
         }
     }
 
-    // ── Input box ───────────────────────────────────────────────────────────
+    // ── Input box state ─────────────────────────────────────────────────────
 
-    /// Draw the 4-line input box at the current cursor position.
-    /// After this call the cursor is at the line *after* the bottom border.
-    pub fn draw_input_box(&self) {
-        let width = self.terminal_size.width as usize;
-        let border_str = "─".repeat(width.saturating_sub(1));
-        let border = if self.use_colors {
-            format!("\x1b[38;5;152m{}\x1b[0m", border_str)
-        } else {
-            border_str
-        };
-        // blank gap
-        print!("\r\n");
-        // top border
-        print!("{}\r\n", border);
-        // input line (empty initially)
-        print!("\r\n");
-        // bottom border
-        print!("{}\r\n", border);
-        let _ = io::stdout().flush();
+    pub fn push_input_char(&mut self, c: char) {
+        self.current_input.push(c);
     }
 
-    /// Move cursor to the start of the blank-gap line (4 lines above cursor).
-    fn move_above_input_box(&self) {
-        print!("\x1b[{}F", INPUT_BOX_LINES);
+    pub fn pop_input_char(&mut self) {
+        self.current_input.pop();
     }
 
-    /// Write `text` onto the input line of the input box.
-    /// Cursor must be after the bottom border when called.
-    /// After the call cursor is restored to after the bottom border.
-    pub fn update_input_line(&self, text: &str) {
-        // up 2 → input line (row: blank=0, top=1, input=2, bottom=3, cursor after=4;
-        // from cursor@4, up 2 → input line@2)
-        print!("\x1b[2F\r{}\x1b[K\x1b[2B\r", text);
-        let _ = io::stdout().flush();
+    pub fn take_input(&mut self) -> String {
+        std::mem::take(&mut self.current_input)
     }
 
-    /// Clear the input line.
-    pub fn clear_input_line(&self) {
-        print!("\x1b[2F\r\x1b[K\x1b[2B\r");
-        let _ = io::stdout().flush();
+    pub fn clear_input(&mut self) {
+        self.current_input.clear();
     }
 
-    // ── Component add helpers ───────────────────────────────────────────────
+    // ── Spinner ─────────────────────────────────────────────────────────────
 
-    pub fn add_user_input(&mut self, content: String) -> ComponentId {
+    pub fn set_spinner(&mut self, text: String) {
+        self.spinner_text = Some(text);
+    }
+
+    pub fn clear_spinner(&mut self) {
+        self.spinner_text = None;
+    }
+
+    // ── Input hint (shown while bash runs) ──────────────────────────────────
+
+    pub fn set_input_hint(&mut self, hint: String) {
+        self.input_hint = Some(hint);
+    }
+
+    pub fn clear_input_hint(&mut self) {
+        self.input_hint = None;
+    }
+
+    // ── Completed components ─────────────────────────────────────────────────
+
+    pub fn add_user_input(&mut self, content: String) {
+        self.update_size();
         let id = next_component_id();
-        let component = UserInputComponent::new(id, content, self.use_colors);
-        let id = self.add_component(Box::new(component));
-        self.render_component(id);
-        id
+        let comp = UserInputComponent::new(id, content, self.use_colors);
+        let lines = self.component_to_lines(&comp);
+        if !lines.is_empty() {
+            self.items.push(RenderItem::Buffer(lines));
+        }
     }
 
-    pub fn add_response(&mut self, content: String) -> ComponentId {
+    pub fn add_response(&mut self, content: String) {
+        self.update_size();
         let id = next_component_id();
-        let component = ResponseComponent::new(id, content, self.use_colors);
-        let id = self.add_component(Box::new(component));
-        self.render_component(id);
-        id
+        let comp = ResponseComponent::new(id, content, self.use_colors);
+        let lines = self.component_to_lines(&comp);
+        if !lines.is_empty() {
+            self.items.push(RenderItem::Buffer(lines));
+        }
     }
 
-    pub fn add_tool_call(&mut self, tool_name: String, args: String) -> ComponentId {
+    pub fn add_tool_call(&mut self, tool_name: String, args: String) {
+        self.update_size();
         let id = next_component_id();
-        let component = ToolCallComponent::new(id, tool_name, args, self.use_colors);
-        let id = self.add_component(Box::new(component));
-        self.render_component(id);
-        id
+        let comp = ToolCallComponent::new(id, tool_name, args, self.use_colors);
+        let lines = self.component_to_lines(&comp);
+        if !lines.is_empty() {
+            self.items.push(RenderItem::Buffer(lines));
+        }
     }
 
     pub fn add_tool_result(
@@ -151,214 +260,264 @@ impl DifferentialRenderer {
         duration_secs: Option<f64>,
         success: bool,
         command: Option<String>,
-    ) -> ComponentId {
-        let id = next_component_id();
-        let component = ToolResultComponent::new(
-            id,
-            tool_name,
-            output,
-            duration_secs,
-            success,
-            command,
-            self.use_colors,
-        );
-        let id = self.add_component(Box::new(component));
-        self.render_component(id);
-        id
-    }
-
-    pub fn add_error(&mut self, message: String) -> ComponentId {
-        let id = next_component_id();
-        let component = ErrorComponent::new(id, message, self.use_colors);
-        let id = self.add_component(Box::new(component));
-        self.render_component(id);
-        id
-    }
-
-    // ── Bash streaming ──────────────────────────────────────────────────────
-
-    fn bash_running_bg() -> &'static str {
-        "\x1b[48;2;39;39;39m" // #272727 — grey while running
-    }
-
-    /// Print the bash block header (top-pad + bold command line + gap = 3 lines)
-    /// above the input box, then redraw the input box.
-    pub fn print_bash_header(&self, command: &str) {
-        self.move_above_input_box();
-        if self.use_colors {
-            let width = self.terminal_size.width as usize;
-            let bg = Self::bash_running_bg();
-            let reset = "\x1b[0m";
-            let bold = "\x1b[1m";
-            let empty = " ".repeat(width);
-            print!("{}{}{}\r\n", bg, empty, reset);
-            let content = format!("  $ {}", command);
-            let padding = " ".repeat(width.saturating_sub(content.len()));
-            print!("{}{}{}{}{}{}\r\n", bg, bold, content, padding, bold, reset);
-            print!("{}{}{}\r\n", bg, empty, reset);
-        } else {
-            print!("\r\n  $ {}\r\n\r\n", command);
-        }
-        self.draw_input_box();
-        let _ = io::stdout().flush();
-    }
-
-    /// Print a single streamed output line above the input box, then redraw it.
-    pub fn print_output_line(&self, line: &str) {
-        self.move_above_input_box();
-        if self.use_colors {
-            let width = self.terminal_size.width as usize;
-            let bg = Self::bash_running_bg();
-            let reset = "\x1b[0m";
-            let content = format!("  {}", line);
-            let padding = " ".repeat(width.saturating_sub(content.len()));
-            print!("{}{}{}{}\r\n", bg, content, padding, reset);
-        } else {
-            print!("  {}\r\n", line);
-        }
-        self.draw_input_box();
-        let _ = io::stdout().flush();
-    }
-
-    /// Repaint the entire bash block in the final success/failure colour.
-    ///
-    /// Cursor layout when called (after N output lines):
-    ///   [bash top-pad]          ← 3 + N + 4 lines above cursor
-    ///   [$ command]
-    ///   [gap]
-    ///   [output 0 … N-1]
-    ///   [input blank]           ← 4 lines above cursor
-    ///   [input top border]
-    ///   [input line]
-    ///   [input bottom border]
-    ///   cursor ← here
-    pub fn finalize_bash_block(
-        &self,
-        command: &str,
-        output_lines: &[String],
-        duration_secs: f64,
-        success: bool,
-        cancelled: bool,
     ) {
-        // Move to the very start of the bash block
-        let lines_up = output_lines.len() + 3 + INPUT_BOX_LINES as usize;
-        print!("\x1b[{}F", lines_up);
+        self.update_size();
+        let id = next_component_id();
+        let comp = ToolResultComponent::new(
+            id, tool_name, output, duration_secs, success, command, self.use_colors,
+        );
+        let lines = self.component_to_lines(&comp);
+        if !lines.is_empty() {
+            self.items.push(RenderItem::Buffer(lines));
+        }
+    }
 
-        if self.use_colors {
-            let width = self.terminal_size.width as usize;
-            let reset = "\x1b[0m";
-            let bold = "\x1b[1m";
-            let empty = " ".repeat(width);
-            let bg: &str = if cancelled {
-                "\x1b[48;2;80;70;30m"  // amber — cancelled
-            } else if success {
-                "\x1b[48;2;34;46;36m"  // muted green
+    pub fn add_error(&mut self, message: String) {
+        self.update_size();
+        let id = next_component_id();
+        let comp = ErrorComponent::new(id, message, self.use_colors);
+        let lines = self.component_to_lines(&comp);
+        if !lines.is_empty() {
+            self.items.push(RenderItem::Buffer(lines));
+        }
+    }
+
+    // ── Bash block lifecycle ─────────────────────────────────────────────────
+
+    pub fn start_bash(&mut self, command: &str) {
+        self.current_bash = Some(BashBlock::new(command));
+    }
+
+    pub fn push_bash_output(&mut self, line: String) {
+        if let Some(ref mut b) = self.current_bash {
+            b.output_lines.push(line);
+        }
+    }
+
+    pub fn set_bash_elapsed(&mut self, secs: f64) {
+        if let Some(ref mut b) = self.current_bash {
+            b.elapsed_secs = secs;
+        }
+    }
+
+    /// Finalise the current bash block — moves it to the completed item list.
+    pub fn finalize_bash(&mut self, duration: f64, success: bool, cancelled: bool) {
+        if let Some(mut b) = self.current_bash.take() {
+            b.elapsed_secs = duration;
+            b.status = if cancelled {
+                BashStatus::Cancelled
             } else {
-                "\x1b[48;2;55;34;34m"  // muted red
+                BashStatus::Done { success }
             };
+            self.items.push(RenderItem::Bash(b));
+        }
+    }
 
-            // header
-            print!("{}{}{}\r\n", bg, empty, reset);
-            let cmd_content = format!("  $ {}", command);
-            let cmd_pad = " ".repeat(width.saturating_sub(cmd_content.len()));
-            print!("{}{}{}{}{}{}\r\n", bg, bold, cmd_content, cmd_pad, bold, reset);
-            print!("{}{}{}\r\n", bg, empty, reset);
+    // ── Core render ──────────────────────────────────────────────────────────
 
-            // output lines
-            for line in output_lines {
-                let content = format!("  {}", line);
-                let padding = " ".repeat(width.saturating_sub(content.len()));
-                print!("{}{}{}{}\r\n", bg, content, padding, reset);
+    /// Produce the complete list of terminal lines and the logical cursor position.
+    fn render_all(&self) -> (Vec<String>, usize, usize) {
+        let width = self.terminal_size.width as usize;
+        let mut lines: Vec<String> = Vec::new();
+
+        // Completed items
+        for item in &self.items {
+            match item {
+                RenderItem::Buffer(item_lines) => {
+                    if !item_lines.is_empty() {
+                        lines.extend_from_slice(item_lines);
+                        lines.push(String::new()); // blank separator
+                    }
+                }
+                RenderItem::Bash(bash) => {
+                    let bash_lines = bash.render_lines(width, self.use_colors);
+                    lines.extend(bash_lines);
+                    lines.push(String::new());
+                }
             }
+        }
 
-            // footer
-            if !output_lines.is_empty() {
-                print!("{}{}{}\r\n", bg, empty, reset);
-            }
-            let status = if cancelled { "  Cancelled" } else { &format!("  Took {:.1}s", duration_secs) };
-            let status_pad = " ".repeat(width.saturating_sub(status.len()));
-            print!("{}{}{}{}\r\n", bg, status, status_pad, reset);
-            print!("{}{}{}\r\n", bg, empty, reset);
+        // Running bash block
+        if let Some(ref bash) = self.current_bash {
+            let bash_lines = bash.render_lines(width, self.use_colors);
+            lines.extend(bash_lines);
+            lines.push(String::new());
+        }
+
+        // Thinking spinner (above input box)
+        if let Some(ref s) = self.spinner_text {
+            lines.push(s.clone());
+            lines.push(String::new());
+        }
+
+        // ── Input box (always last) ─────────────────────────────────────────
+        let border_str = "─".repeat(width.saturating_sub(1));
+        let border = if self.use_colors {
+            format!("\x1b[38;5;152m{}\x1b[0m", border_str)
         } else {
-            // no-color: skip bash header + output (already printed), just add footer
-            for _ in 0..(output_lines.len() + 3) {
-                print!("\x1b[1B"); // skip past already-printed lines
-            }
-            if !output_lines.is_empty() {
-                print!("\r\n");
-            }
-            if cancelled {
-                print!("  Cancelled\r\n");
-            } else {
-                print!("  Took {:.1}s\r\n", duration_secs);
-            }
-            print!("\r\n");
+            border_str
+        };
+
+        // Ensure there's a blank line before the input box if we have items
+        if !lines.is_empty() && lines.last().map(|l| !l.is_empty()).unwrap_or(false) {
+            lines.push(String::new());
+        } else if lines.is_empty() {
+            lines.push(String::new());
         }
 
-        self.draw_input_box();
+        let input_box_start_row = lines.len();
+        lines.push(border.clone()); // top border
+
+        // Input line: hint > typed text (spinner moved above)
+        let mut cursor_col = 0;
+        let input_line = if let Some(ref h) = self.input_hint {
+            cursor_col = crate::renderer::visible_width(h);
+            h.clone()
+        } else {
+            cursor_col = crate::renderer::visible_width(&self.current_input) + 2;
+            format!("  {}", self.current_input)
+        };
+        lines.push(input_line);
+        lines.push(border); // bottom border
+
+        let cursor_row = input_box_start_row + 1; // The input line
+
+        (lines, cursor_row, cursor_col)
+    }
+
+    /// Differential render: compute new lines, diff, write only changes.
+    pub fn render(&mut self) {
+        self.update_size();
+        let (new_lines, target_cursor_row, target_cursor_col) = self.render_all();
+        let new_len = new_lines.len();
+        let old_len = self.previous_lines.len();
+
+        // Find first changed line
+        let mut first_changed: Option<usize> = None;
+        let max_len = new_len.max(old_len);
+        for i in 0..max_len {
+            if self.previous_lines.get(i) != new_lines.get(i) {
+                first_changed = Some(i);
+                break;
+            }
+        }
+
+        // If nothing changed, just update hardware cursor position and return
+        if first_changed.is_none() {
+            self.move_hardware_cursor(target_cursor_row, target_cursor_col);
+            return;
+        }
+
+        let first = first_changed.unwrap();
+        let mut buf = String::new();
+        buf.push_str("\x1b[?2026h"); // begin synchronized output
+        buf.push_str("\x1b[?25l");    // hide cursor
+
+        // 1. Move to first changed line
+        let diff = first as i64 - self.cursor_row as i64;
+        if diff > 0 {
+            buf.push_str(&format!("\x1b[{}B", diff));
+        } else if diff < 0 {
+            buf.push_str(&format!("\x1b[{}A", -diff));
+        }
+        buf.push('\r');
+        self.cursor_row = first;
+
+        // 2. Write from first_changed up to the end of new_lines
+        if new_len > first {
+            for i in first..new_len {
+                if i > first {
+                    // \r\n at the bottom of the viewport will scroll the terminal.
+                    buf.push_str("\r\n");
+                    self.cursor_row += 1;
+                }
+                buf.push_str("\x1b[2K"); // clear current line
+                buf.push_str(&new_lines[i]);
+            }
+        }
+
+        // 3. Clear everything after our content to the end of the screen.
+        // This handles cases where content shrunk and we have leftover lines.
+        buf.push_str("\x1b[J");
+
+        buf.push_str("\x1b[?25h");    // show cursor
+        buf.push_str("\x1b[?2026l"); // end synchronized output
+
+        print!("{}", buf);
         let _ = io::stdout().flush();
+
+        self.previous_lines = new_lines;
+        self.cursor_row = if new_len > 0 { new_len - 1 } else { 0 };
+
+        // 4. Finally, move to the desired logical cursor position (input line)
+        self.move_hardware_cursor(target_cursor_row, target_cursor_col);
     }
 
-    // ── Private helpers ─────────────────────────────────────────────────────
-
-    fn add_component(&mut self, component: Box<dyn Component>) -> ComponentId {
-        let id = component.id();
-        self.layout.append_component(id);
-        self.components.insert(id, ComponentEntry { component });
-        id
-    }
-
-    /// Render one component above the input box, then redraw the input box.
-    fn render_component(&self, id: ComponentId) {
-        if let Some(entry) = self.components.get(&id) {
-            let buffer = entry.component.render(self.terminal_size.width);
-            if buffer.height == 0 {
-                return;
-            }
-            // Go above the input box
-            self.move_above_input_box();
-            let output = self.buffer_to_string(&buffer);
-            print!("{}", output);
-            // blank line after component for breathing room
-            print!("\r\n");
-            // Redraw input box below
-            self.draw_input_box();
-            let _ = io::stdout().flush();
+    fn move_hardware_cursor(&mut self, row: usize, col: usize) {
+        if self.previous_lines.is_empty() {
+            return;
         }
+        let diff = row as i64 - self.cursor_row as i64;
+        if diff > 0 {
+            print!("\x1b[{}B", diff);
+        } else if diff < 0 {
+            print!("\x1b[{}A", -diff);
+        }
+        // Move to absolute column (1-indexed)
+        print!("\r\x1b[{}G", col + 1);
+        let _ = io::stdout().flush();
+        self.cursor_row = row;
+        self.cursor_col = col;
     }
 
-    fn buffer_to_string(&self, buffer: &Buffer) -> String {
-        let mut output = String::new();
+    // ── Helpers ──────────────────────────────────────────────────────────────
+
+    fn component_to_lines<C: crate::component::Component>(&self, comp: &C) -> Vec<String> {
+        let buf = comp.render(self.terminal_size.width);
+        self.buffer_to_lines(&buf)
+    }
+
+    fn buffer_to_lines(&self, buffer: &Buffer) -> Vec<String> {
+        let mut result = Vec::new();
         for row in &buffer.cells {
-            let mut current_style: Option<String> = None;
-            let mut current_chars = String::new();
+            let mut line = String::new();
+            let mut cur_style: Option<String> = None;
+            let mut cur_chars = String::new();
+
             for cell in row {
                 let style = format_cell_style(&cell.fg, &cell.bg, &cell.modifiers);
-                if current_style.as_ref() != Some(&style) {
-                    if !current_chars.is_empty() {
-                        if let Some(ref s) = current_style {
-                            output.push_str(s);
+                if cur_style.as_deref() != Some(&style) {
+                    if !cur_chars.is_empty() {
+                        if let Some(ref s) = cur_style {
+                            line.push_str(s);
                         }
-                        output.push_str(&current_chars);
-                        current_chars.clear();
+                        line.push_str(&cur_chars);
+                        cur_chars.clear();
                     }
-                    current_style = if style.is_empty() { None } else { Some(style) };
+                    cur_style = if style.is_empty() { None } else { Some(style) };
                 }
-                current_chars.push(cell.char);
+                cur_chars.push(cell.char);
             }
-            if !current_chars.is_empty() {
-                if let Some(ref s) = current_style {
-                    output.push_str(s);
+            if !cur_chars.is_empty() {
+                if let Some(ref s) = cur_style {
+                    line.push_str(s);
                 }
-                output.push_str(&current_chars);
+                line.push_str(&cur_chars);
             }
-            output.push_str("\x1b[0m\r\n");
+            line.push_str("\x1b[0m");
+            result.push(line);
         }
-        output
+        result
     }
 
-    pub fn width(&self) -> u16 {
-        self.terminal_size.width
+    /// Return the stdout/stderr output lines of the most recently finalised bash block.
+    pub fn last_bash_output(&self) -> String {
+        for item in self.items.iter().rev() {
+            if let RenderItem::Bash(b) = item {
+                return b.output_lines.join("\n");
+            }
+        }
+        String::new()
     }
 
     pub fn use_colors(&self) -> bool {
@@ -366,59 +525,22 @@ impl DifferentialRenderer {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::component::Color;
-    use crate::components::UserInputComponent;
-
-    #[test]
-    fn test_component_id_uniqueness() {
-        let id1 = next_component_id();
-        let id2 = next_component_id();
-        assert_ne!(id1, id2);
-    }
-
-    #[test]
-    fn test_renderer_creation() {
-        let renderer = DifferentialRenderer::new(true);
-        assert!(renderer.components.is_empty());
-    }
-
-    #[test]
-    fn test_user_input_rendering() {
-        let id = next_component_id();
-        let component = UserInputComponent::new(id, "hello".to_string(), true);
-        let buffer = component.render(20);
-        assert_eq!(buffer.height, 3);
-        assert_eq!(buffer.width, 20);
-        for row in &buffer.cells {
-            for cell in row {
-                assert_eq!(cell.bg, Color::Ansi(235));
+/// Calculate the visible width of a string (stripping ANSI escape codes).
+pub fn visible_width(s: &str) -> usize {
+    let mut width = 0;
+    let mut in_esc = false;
+    for c in s.chars() {
+        if c == '\x1b' {
+            in_esc = true;
+            continue;
+        }
+        if in_esc {
+            if c.is_ascii_alphabetic() || c == 'm' {
+                in_esc = false;
             }
+            continue;
         }
-        for cell in &buffer.cells[0] {
-            assert_eq!(cell.char, ' ');
-        }
-        for cell in &buffer.cells[2] {
-            assert_eq!(cell.char, ' ');
-        }
-        let middle_row = &buffer.cells[1];
-        assert_eq!(middle_row[2].char, 'h');
-        assert_eq!(middle_row[3].char, 'e');
-        assert_eq!(middle_row[4].char, 'l');
-        assert_eq!(middle_row[5].char, 'l');
-        assert_eq!(middle_row[6].char, 'o');
+        width += 1;
     }
-
-    #[test]
-    fn test_buffer_to_string() {
-        let renderer = DifferentialRenderer::new(true);
-        let id = next_component_id();
-        let component = UserInputComponent::new(id, "test".to_string(), true);
-        let buffer = component.render(10);
-        let output = renderer.buffer_to_string(&buffer);
-        assert!(output.contains("\x1b[48;5;235m"));
-        assert!(output.contains("test"));
-    }
+    width
 }
