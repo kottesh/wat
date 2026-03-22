@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::io::{self, Write};
 
-use crate::component::{Buffer, Component, ComponentId, Size, format_cell_style};
+use crate::component::{format_cell_style, Buffer, Component, ComponentId, Size};
 use crate::components::{
     ErrorComponent, ResponseComponent, ToolCallComponent, ToolResultComponent, UserInputComponent,
 };
@@ -130,23 +130,29 @@ impl DifferentialRenderer {
         id
     }
 
+    /// Background colour for use during streaming (always grey — in-flight).
+    fn bash_running_bg() -> &'static str {
+        "\x1b[48;2;39;39;39m" // #272727
+    }
+
     // ── Bash streaming methods ──────────────────────────────────────────
 
-    /// Print the bash block: top pad + command + gap.
+    /// Print the bash block header: top-pad + bold command line + gap (3 lines).
+    /// Uses grey background; the whole block is repainted on completion.
     pub fn print_bash_header(&self, command: &str) {
         if self.use_colors {
             let width = self.terminal_size.width as usize;
-            let bg = "\x1b[48;2;30;38;30m";
+            let bg    = Self::bash_running_bg();
             let reset = "\x1b[0m";
-            let bold = "\x1b[1m";
+            let bold  = "\x1b[1m";
             let empty = " ".repeat(width);
-            // Top padding
+            // top padding
             print!("{}{}{}\r\n", bg, empty, reset);
-            // Command line — bg covers entire row including padding
+            // command line
             let content = format!("  $ {}", command);
             let padding = " ".repeat(width.saturating_sub(content.len()));
             print!("{}{}{}{}{}{}\r\n", bg, bold, content, padding, bold, reset);
-            // Gap between command and output
+            // gap
             print!("{}{}{}\r\n", bg, empty, reset);
         } else {
             println!();
@@ -156,15 +162,14 @@ impl DifferentialRenderer {
         let _ = io::stdout().flush();
     }
 
-    /// Print a single line of command output.
+    /// Print one streamed output line (grey while running).
     pub fn print_output_line(&self, line: &str) {
         if self.use_colors {
-            let width = self.terminal_size.width as usize;
-            let bg = "\x1b[48;2;30;38;30m";
-            let reset = "\x1b[0m";
+            let width   = self.terminal_size.width as usize;
+            let bg      = Self::bash_running_bg();
+            let reset   = "\x1b[0m";
             let content = format!("  {}", line);
             let padding = " ".repeat(width.saturating_sub(content.len()));
-            // Entire line gets bg — content + padding, reset only at end
             print!("{}{}{}{}\r\n", bg, content, padding, reset);
         } else {
             println!("  {}", line);
@@ -172,33 +177,113 @@ impl DifferentialRenderer {
         let _ = io::stdout().flush();
     }
 
-    /// Clear the timer line and bottom padding (2 lines total).
-    /// Cursor should be on timer line when called.
-    pub fn clear_timer_line(&self) {
-        print!("\r\x1b[2K");  // Clear timer line (where cursor is)
-        print!("\x1b[1B");    // Move down to bottom padding line
-        print!("\r\x1b[2K");  // Clear bottom padding line
-        print!("\x1b[1A");    // Move back up to timer line (ready for output)
+    /// Called when the command finishes.
+    ///
+    /// Cursor is sitting on the live-timer line (the timer thread always parks
+    /// it there after each tick).  This method:
+    ///   1. Clears the 2-line timer area.
+    ///   2. Moves the cursor all the way back to the top of the bash block
+    ///      (3 header lines + N output lines above the timer).
+    ///   3. Repaints every line — header, output, footer — with the final
+    ///      green (success) or red (failure) background.
+    pub fn finalize_bash_block(
+        &self,
+        command: &str,
+        output_lines: &[String],
+        duration_secs: f64,
+        success: bool,
+    ) {
+        if self.use_colors {
+            let width   = self.terminal_size.width as usize;
+            let reset   = "\x1b[0m";
+            let bold    = "\x1b[1m";
+            let empty   = " ".repeat(width);
+            let bg: &str = if success {
+                "\x1b[48;2;34;46;36m"   // green (muted)
+            } else {
+                "\x1b[48;2;55;34;34m"   // red (muted)
+            };
+
+            // ── 1. Clear the 2-line live-timer area ──────────────────────
+            print!("\r\x1b[2K");   // clear timer line
+            print!("\x1b[1B");     // down to bottom-padding line
+            print!("\r\x1b[2K");   // clear bottom-padding line
+            print!("\x1b[1A");     // back up to timer line
+
+            // ── 2. Move cursor to start of bash block ─────────────────────
+            //  header = 3 lines  +  N output lines  above current position
+            let lines_above = 3 + output_lines.len();
+            print!("\x1b[{}F", lines_above); // up N lines, column 0
+
+            // ── 3. Repaint header ─────────────────────────────────────────
+            // top padding
+            print!("{}{}{}\r\n", bg, empty, reset);
+            // command line
+            let cmd_content = format!("  $ {}", command);
+            let cmd_pad = " ".repeat(width.saturating_sub(cmd_content.len()));
+            print!("{}{}{}{}{}{}\r\n", bg, bold, cmd_content, cmd_pad, bold, reset);
+            // gap
+            print!("{}{}{}\r\n", bg, empty, reset);
+
+            // ── 4. Repaint output lines ───────────────────────────────────
+            for line in output_lines {
+                let content = format!("  {}", line);
+                let padding = " ".repeat(width.saturating_sub(content.len()));
+                print!("{}{}{}{}\r\n", bg, content, padding, reset);
+            }
+
+            // ── 5. Paint footer ───────────────────────────────────────────
+            // gap row between output and timing (only when there was output)
+            if !output_lines.is_empty() {
+                print!("{}{}{}\r\n", bg, empty, reset);
+            }
+            // "Took X.Xs" row
+            let took = format!("  Took {:.1}s", duration_secs);
+            let took_pad = " ".repeat(width.saturating_sub(took.len()));
+            print!("{}{}{}{}\r\n", bg, took, took_pad, reset);
+            // bottom padding
+            print!("{}{}{}\r\n", bg, empty, reset);
+        } else {
+            // No-colour path: clear the 2-line timer area, then print timing.
+            print!("\r\x1b[2K");
+            print!("\x1b[1B");
+            print!("\r\x1b[2K");
+            print!("\x1b[1A");
+            if !output_lines.is_empty() {
+                println!();
+            }
+            println!("  Took {:.1}s", duration_secs);
+            println!();
+        }
+
+        // blank line after the entire block
+        println!();
         let _ = io::stdout().flush();
     }
 
-    /// Finalize: gap row (if has_output) + took X.Xs + bottom padding.
-    /// The caller must have already cleared any previous timer line.
-    pub fn print_bash_footer(&self, duration_secs: f64, success: bool, has_output: bool) {
+    // ── kept for compile compatibility (no longer called) ───────────────
+    #[allow(dead_code)]
+    pub fn set_bash_success(&self, _success: bool) {}
+
+    #[allow(dead_code)]
+    pub fn clear_timer_line(&self) {
+        print!("\r\x1b[2K");
+        print!("\x1b[1B");
+        print!("\r\x1b[2K");
+        print!("\x1b[1A");
+        let _ = io::stdout().flush();
+    }
+
+    #[allow(dead_code)]
+    pub fn print_bash_footer(&self, duration_secs: f64, _success: bool, has_output: bool) {
         if self.use_colors {
             let width = self.terminal_size.width as usize;
-            let bg = if success {
-                "\x1b[48;2;30;38;30m"
-            } else {
-                "\x1b[48;2;60;30;30m"
-            };
+            let bg    = Self::bash_running_bg();
             let reset = "\x1b[0m";
             let empty = " ".repeat(width);
-            // Gap between output and timer (only if there was output)
             if has_output {
                 print!("{}{}{}\r\n", bg, empty, reset);
             }
-            // Timer row
             let content = format!("  Took {:.1}s", duration_secs);
             let padding = " ".repeat(width.saturating_sub(content.len()));
             print!("{}{}{}{}\r\n", bg, content, padding, reset);

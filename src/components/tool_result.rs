@@ -86,15 +86,15 @@ impl Component for ToolResultComponent {
                 if self.state.success {
                     Color::Rgb {
                         r: 30,
-                        g: 38,
-                        b: 30,
-                    } // Dark green tint
+                        g: 100,
+                        b: 50,
+                    } // green
                 } else {
                     Color::Rgb {
-                        r: 60,
-                        g: 30,
-                        b: 30,
-                    } // Dark red tint
+                        r: 150,
+                        g: 40,
+                        b: 40,
+                    } // red
                 }
             } else if self.is_read_file() {
                 Color::Ansi(235)

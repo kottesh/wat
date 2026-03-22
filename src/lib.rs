@@ -14,7 +14,7 @@ pub mod llm;
 pub mod tools;
 
 /// Re-exports for convenience
-pub use agent::{Agent, SimpleAgent};
+pub use agent::Agent;
 pub use config::Config;
 pub use llm::Message;
 pub use renderer::DifferentialRenderer;

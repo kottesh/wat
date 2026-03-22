@@ -166,7 +166,7 @@ impl Agent {
                             continue;
                         }
 
-                        // Show command header immediately
+                        // Show command header immediately (grey while running)
                         self.renderer.print_bash_header(command);
 
                         // Start streaming
@@ -175,7 +175,7 @@ impl Agent {
                         let mut output_lines: Vec<String> = Vec::new();
                         let mut exit_code: Option<i32> = None;
 
-                        // Spawn a live timer thread — timer with bottom padding
+                        // Spawn a live timer thread — always grey while running
                         let timer_alive = Arc::new(AtomicBool::new(true));
                         let timer_alive_clone = timer_alive.clone();
                         let timer_start = start.clone();
@@ -186,7 +186,7 @@ impl Agent {
                                 let elapsed = timer_start.elapsed().as_secs_f64();
                                 if use_colors {
                                     let width = term_width as usize;
-                                    let bg = "\x1b[48;2;30;38;30m";
+                                    let bg    = "\x1b[48;2;39;39;39m"; // grey while running
                                     let reset = "\x1b[0m";
                                     let empty = " ".repeat(width);
                                     // Timer row
@@ -195,7 +195,7 @@ impl Agent {
                                     print!("{}{}{}{}\r\n", bg, content, padding, reset);
                                     // Bottom padding
                                     print!("{}{}{}\r\n", bg, empty, reset);
-                                    // Move back up 2 lines so timer overwrites itself next time
+                                    // Move back up 2 lines so timer overwrites itself next tick
                                     print!("\x1b[2F");
                                 } else {
                                     println!("  Took {:.1}s", elapsed);
@@ -228,17 +228,16 @@ impl Agent {
                             }
                         }
 
-                        // Stop timer thread and wait for it
+                        // Stop timer and wait for it to park cursor on the timer line
                         timer_alive.store(false, Ordering::Relaxed);
                         let _ = timer_thread.join();
 
                         let duration = start.elapsed().as_secs_f64();
-                        let success = exit_code == Some(0);
+                        let success  = exit_code == Some(0);
 
-                        // Clear last timer tick, then print gap + timing + bottom pad
-                        self.renderer.clear_timer_line();
-                        let has_output = !output_lines.is_empty();
-                        self.renderer.print_bash_footer(duration, success, has_output);
+                        // Repaint the entire block (header + output + footer) with
+                        // the final green/red colour in one shot.
+                        self.renderer.finalize_bash_block(command, &output_lines, duration, success);
 
                         all_results.push_str(&format!(
                             "$ {}\n{}\n",
@@ -297,24 +296,4 @@ When asked to do something, use the appropriate tool. Show the tool call you're 
     }
 }
 
-/// Simple agent for non-interactive queries
-pub struct SimpleAgent {
-    llm_client: LlmClient,
-}
 
-impl SimpleAgent {
-    pub fn new(config: Config) -> Result<Self> {
-        let llm_client = LlmClient::new(config)?;
-        Ok(Self { llm_client })
-    }
-
-    pub async fn process_query(&self, query: &str) -> Result<String> {
-        let messages = vec![
-            Message::system("You are WAT, a terminal assistant. Be concise."),
-            Message::user(query),
-        ];
-
-        let response = self.llm_client.query(messages).await?;
-        Ok(response.content)
-    }
-}
