@@ -1,11 +1,12 @@
-use std::process::Command;
-use std::fs;
 use std::path::Path;
-use std::sync::mpsc;
-use std::thread;
+use std::fs;
 use anyhow::Result;
 use async_trait::async_trait;
 use serde_json::Value;
+use tokio::process::Command;
+use std::process::Stdio;
+use tokio::io::{AsyncBufReadExt, BufReader};
+use futures_util::stream::StreamExt;
 
 /// Result of executing a tool
 #[derive(Debug, Clone)]
@@ -73,36 +74,74 @@ impl Tool for BashTool {
         let command = args["command"].as_str().ok_or_else(|| anyhow::anyhow!("Missing command"))?;
         let start = std::time::Instant::now();
         
-        let (rx, _handle) = execute_tool_streaming(command);
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg(command)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()?;
+
+        let stdout = child.stdout.take().unwrap();
+        let stderr = child.stderr.take().unwrap();
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(100);
+
+        let tx_out = tx.clone();
+        tokio::spawn(async move {
+            let mut reader = tokio::io::BufReader::new(stdout).lines();
+            while let Ok(Some(line)) = reader.next_line().await {
+                if tx_out.send(ToolUpdate::Stdout(line)).await.is_err() { break; }
+            }
+        });
+
+        let tx_err = tx.clone();
+        tokio::spawn(async move {
+            let mut reader = tokio::io::BufReader::new(stderr).lines();
+            while let Ok(Some(line)) = reader.next_line().await {
+                if tx_err.send(ToolUpdate::Stderr(line)).await.is_err() { break; }
+            }
+        });
+
         let mut output = String::new();
-        let mut success = false;
         
-        while let Ok(event) = rx.recv() {
-            match event {
-                StreamEvent::Stdout(line) => {
-                    output.push_str(&line);
-                    output.push('\n');
-                    on_update(ToolUpdate::Stdout(line));
+        loop {
+            tokio::select! {
+                Some(update) = rx.recv() => {
+                    match &update {
+                        ToolUpdate::Stdout(l) | ToolUpdate::Stderr(l) => {
+                            output.push_str(l);
+                            output.push('\n');
+                        }
+                        _ => {}
+                    }
+                    on_update(update);
                 }
-                StreamEvent::Stderr(line) => {
-                    output.push_str(&line);
-                    output.push('\n');
-                    on_update(ToolUpdate::Stderr(line));
-                }
-                StreamEvent::Done { exit_code } => {
-                    success = exit_code == Some(0);
-                    break;
+                status = child.wait() => {
+                    // Drain remaining channel items
+                    while let Ok(update) = rx.try_recv() {
+                        match &update {
+                            ToolUpdate::Stdout(l) | ToolUpdate::Stderr(l) => {
+                                output.push_str(l);
+                                output.push('\n');
+                            }
+                            _ => {}
+                        }
+                        on_update(update);
+                    }
+                    
+                    let success = status.map(|s| s.success()).unwrap_or(false);
+                    return Ok(ToolResult {
+                        content: truncate_output(&output, 100),
+                        details: serde_json::json!({ "output": output, "success": success }),
+                        success,
+                        duration_secs: start.elapsed().as_secs_f64(),
+                    });
                 }
             }
         }
-        
-        Ok(ToolResult {
-            content: truncate_output(&output, 100),
-            details: serde_json::json!({ "output": output, "success": success }),
-            success,
-            duration_secs: start.elapsed().as_secs_f64(),
-        })
     }
+
 }
 
 pub struct ReadFileTool;
@@ -223,98 +262,6 @@ fn truncate_output(output: &str, max_lines: usize) -> String {
     }
 }
 
-/// Execute a bash command and stream its output line-by-line.
-///
-/// Returns a receiver that yields `StreamEvent` items as they arrive,
-/// and a `thread::JoinHandle` for the spawned process thread.
-/// The caller must drop/join the handle when done.
-pub fn execute_tool_streaming(
-    command: &str,
-) -> (mpsc::Receiver<StreamEvent>, thread::JoinHandle<()>) {
-    let (tx, rx) = mpsc::channel::<StreamEvent>();
-    let command = command.to_string();
-
-    let handle = thread::spawn(move || {
-        let child = match Command::new("sh")
-            .arg("-c")
-            .arg(&command)
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-        {
-            Ok(c) => c,
-            Err(e) => {
-                let _ = tx.send(StreamEvent::Stderr(format!("Failed to spawn: {}", e)));
-                let _ = tx.send(StreamEvent::Done { exit_code: None });
-                return;
-            }
-        };
-
-        // Take stdout/stderr pipes before moving child into the wait thread
-        let mut child = child;
-        let stdout_pipe = child.stdout.take();
-        let stderr_pipe = child.stderr.take();
-
-        // Spawn a thread to read stdout line-by-line
-        let stdout_tx = tx.clone();
-        let stdout_handle = thread::spawn(move || {
-            if let Some(reader) = stdout_pipe {
-                use std::io::{BufRead, BufReader};
-                let mut buf_reader = BufReader::new(reader);
-                let mut line = String::new();
-                loop {
-                    line.clear();
-                    match buf_reader.read_line(&mut line) {
-                        Ok(0) => break,
-                        Ok(_) => {
-                            // Strip trailing newline for clean output
-                            let trimmed = line.trim_end_matches('\n').trim_end_matches('\r');
-                            if stdout_tx.send(StreamEvent::Stdout(trimmed.to_string())).is_err() {
-                                break;
-                            }
-                        }
-                        Err(_) => break,
-                    }
-                }
-            }
-        });
-
-        // Spawn a thread to read stderr line-by-line
-        let stderr_tx = tx.clone();
-        let stderr_handle = thread::spawn(move || {
-            if let Some(reader) = stderr_pipe {
-                use std::io::{BufRead, BufReader};
-                let mut buf_reader = BufReader::new(reader);
-                let mut line = String::new();
-                loop {
-                    line.clear();
-                    match buf_reader.read_line(&mut line) {
-                        Ok(0) => break,
-                        Ok(_) => {
-                            let trimmed = line.trim_end_matches('\n').trim_end_matches('\r');
-                            if stderr_tx.send(StreamEvent::Stderr(trimmed.to_string())).is_err() {
-                                break;
-                            }
-                        }
-                        Err(_) => break,
-                    }
-                }
-            }
-        });
-
-        // Wait for child to finish
-        let status = child.wait().ok();
-        let exit_code = status.and_then(|s| s.code());
-
-        // Wait for reader threads to finish draining
-        let _ = stdout_handle.join();
-        let _ = stderr_handle.join();
-
-        let _ = tx.send(StreamEvent::Done { exit_code });
-    });
-
-    (rx, handle)
-}
 
 /// A call to a tool from the LLM
 #[derive(Debug, Clone)]

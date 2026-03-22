@@ -199,7 +199,40 @@ impl Agent {
                         r.render();
                     });
 
-                    let result = tool.execute(tool_call.args.clone(), on_update).await?;
+                    let mut tool_cancelled = false;
+                    let mut tool_result = None;
+                    
+                    let mut result_future = Box::pin(tool.execute(tool_call.args.clone(), on_update));
+                    
+                    loop {
+                        tokio::select! {
+                            res = &mut result_future => {
+                                tool_result = Some(res?);
+                                break;
+                            }
+                            Some(event) = input_rx.recv() => {
+                                match event {
+                                    InputEvent::Cancel => {
+                                        tool_cancelled = true;
+                                        tool_result = Some(tools::ToolResult {
+                                            content: "Cancelled by user".to_string(),
+                                            details: serde_json::json!({ "cancelled": true }),
+                                            success: false,
+                                            duration_secs: start.elapsed().as_secs_f64(),
+                                        });
+                                        break;
+                                    }
+                                    InputEvent::Shutdown => {
+                                        active.store(false, Ordering::Relaxed);
+                                        return Err(anyhow::anyhow!("Interrupted"));
+                                    }
+                                    _ => {} // Ignore other events
+                                }
+                            }
+                        }
+                    }
+                    
+                    let result = tool_result.unwrap();
 
                     active.store(false, Ordering::Relaxed);
                     let _ = spinner.await;
@@ -208,7 +241,7 @@ impl Agent {
                         let mut r = self.renderer.lock().unwrap();
                         r.clear_input_hint();
                         if tool_call.name == "bash" {
-                            r.finalize_bash(result.duration_secs, result.success, false);
+                            r.finalize_bash(result.duration_secs, result.success, tool_cancelled);
                         } else {
                             r.add_tool_result(
                                 tool_call.name.clone(),
