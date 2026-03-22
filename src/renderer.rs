@@ -310,13 +310,6 @@ impl DifferentialRenderer {
         result
     }
 
-    pub fn clear_input(&mut self) {
-        self.save_undo();
-        self.current_input = vec![String::new()];
-        self.input_cursor_row = 0;
-        self.input_cursor_col = 0;
-    }
-
     // ── Spinner ─────────────────────────────────────────────────────────────
 
     pub fn set_spinner(&mut self, text: String) {
@@ -484,7 +477,6 @@ impl DifferentialRenderer {
             lines.push(String::new());
         }
 
-        let input_box_start_row = lines.len();
         lines.push(border.clone()); // top border
 
         // Multi-line input area (always visible)

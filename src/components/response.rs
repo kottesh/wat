@@ -12,15 +12,13 @@ pub struct ResponseState {
 /// Component that displays agent responses
 #[derive(Debug)]
 pub struct ResponseComponent {
-    id: ComponentId,
     state: ResponseState,
 }
 
 impl ResponseComponent {
     /// Create a new response component
-    pub fn new(id: ComponentId, content: String, use_colors: bool) -> Self {
+    pub fn new(_id: ComponentId, content: String, use_colors: bool) -> Self {
         Self {
-            id,
             state: ResponseState { content, use_colors },
         }
     }
@@ -156,10 +154,6 @@ struct StyledLine {
 }
 
 impl Component for ResponseComponent {
-    fn id(&self) -> ComponentId {
-        self.id
-    }
-
     fn render(&self, width: u16) -> Buffer {
         if width == 0 || self.state.content.is_empty() {
             return Buffer::empty();

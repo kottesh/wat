@@ -17,14 +17,13 @@ pub struct ToolResultState {
 /// Component that displays a tool result
 #[derive(Debug)]
 pub struct ToolResultComponent {
-    id: ComponentId,
     state: ToolResultState,
 }
 
 impl ToolResultComponent {
     /// Create a new tool result component
     pub fn new(
-        id: ComponentId,
+        _id: ComponentId,
         tool_name: String,
         output: String,
         duration_secs: Option<f64>,
@@ -33,7 +32,6 @@ impl ToolResultComponent {
         use_colors: bool,
     ) -> Self {
         Self {
-            id,
             state: ToolResultState {
                 tool_name,
                 output,
@@ -69,10 +67,6 @@ impl ToolResultComponent {
 }
 
 impl Component for ToolResultComponent {
-    fn id(&self) -> ComponentId {
-        self.id
-    }
-
     fn render(&self, width: u16) -> Buffer {
         if width == 0 {
             return Buffer::empty();

@@ -1,11 +1,10 @@
 //! Terminal raw-mode management and line input.
 
-use std::io::{self, Read, Write};
+use std::io::{self, Write};
 use std::os::fd::AsFd;
 use nix::sys::termios;
 use anyhow::{Result, Context};
 
-use crate::renderer::DifferentialRenderer;
 
 pub enum InputEvent {
     /// User pressed Enter with the current input string.

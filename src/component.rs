@@ -236,9 +236,6 @@ pub fn format_cell_style(fg: &Color, bg: &Color, mods: &Modifiers) -> String {
 
 /// Trait for all UI components
 pub trait Component: std::fmt::Debug + Send {
-    /// Get the component's unique ID
-    fn id(&self) -> ComponentId;
-
     /// Render the component to a buffer
     fn render(&self, width: u16) -> Buffer;
 

@@ -1,6 +1,5 @@
 //! Main agent — conversation loop with asynchronous input handling.
 
-use std::io;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 

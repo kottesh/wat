@@ -12,25 +12,19 @@ pub struct UserInputState {
 /// Component that displays user input with a subtle background
 #[derive(Debug)]
 pub struct UserInputComponent {
-    id: ComponentId,
     state: UserInputState,
 }
 
 impl UserInputComponent {
     /// Create a new user input component
-    pub fn new(id: ComponentId, content: String, use_colors: bool) -> Self {
+    pub fn new(_id: ComponentId, content: String, use_colors: bool) -> Self {
         Self {
-            id,
             state: UserInputState { content, use_colors },
         }
     }
 }
 
 impl Component for UserInputComponent {
-    fn id(&self) -> ComponentId {
-        self.id
-    }
-
     fn render(&self, width: u16) -> Buffer {
         if width == 0 {
             return Buffer::empty();

@@ -5,7 +5,6 @@
 
 pub mod component;
 pub mod components;
-pub mod layout;
 pub mod renderer;
 pub mod terminal;
 pub mod agent;

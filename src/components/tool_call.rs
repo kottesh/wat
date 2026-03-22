@@ -13,15 +13,13 @@ pub struct ToolCallState {
 /// Component that displays a tool call
 #[derive(Debug)]
 pub struct ToolCallComponent {
-    id: ComponentId,
     state: ToolCallState,
 }
 
 impl ToolCallComponent {
     /// Create a new tool call component
-    pub fn new(id: ComponentId, tool_name: String, args: String, use_colors: bool) -> Self {
+    pub fn new(_id: ComponentId, tool_name: String, args: String, use_colors: bool) -> Self {
         Self {
-            id,
             state: ToolCallState { tool_name, args, use_colors },
         }
     }
@@ -33,10 +31,6 @@ impl ToolCallComponent {
 }
 
 impl Component for ToolCallComponent {
-    fn id(&self) -> ComponentId {
-        self.id
-    }
-
     fn render(&self, width: u16) -> Buffer {
         if width == 0 {
             return Buffer::empty();

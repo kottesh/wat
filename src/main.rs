@@ -2,8 +2,6 @@ mod terminal;
 mod renderer;
 mod component;
 mod components;
-mod layout;
-mod hotkey;
 mod agent;
 mod config;
 mod llm;

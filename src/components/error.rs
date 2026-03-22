@@ -12,25 +12,19 @@ pub struct ErrorState {
 /// Component that displays an error message
 #[derive(Debug)]
 pub struct ErrorComponent {
-    id: ComponentId,
     state: ErrorState,
 }
 
 impl ErrorComponent {
     /// Create a new error component
-    pub fn new(id: ComponentId, message: String, use_colors: bool) -> Self {
+    pub fn new(_id: ComponentId, message: String, use_colors: bool) -> Self {
         Self {
-            id,
             state: ErrorState { message, use_colors },
         }
     }
 }
 
 impl Component for ErrorComponent {
-    fn id(&self) -> ComponentId {
-        self.id
-    }
-
     fn render(&self, width: u16) -> Buffer {
         if width == 0 {
             return Buffer::empty();

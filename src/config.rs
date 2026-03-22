@@ -191,26 +191,4 @@ impl Config {
     pub fn config_path() -> Result<PathBuf> {
         Ok(Self::config_dir()?.join("config.toml"))
     }
-    
-    /// Get data directory path
-    pub fn data_dir() -> Result<PathBuf> {
-        let dir = dirs::data_dir()
-            .context("Failed to get data directory")?
-            .join("wat");
-        
-        Ok(dir)
-    }
-    
-    /// Get history file path
-    pub fn history_path() -> Result<PathBuf> {
-        Ok(Self::data_dir()?.join("history.json"))
-    }
-    
-    /// Get sessions directory path
-    #[allow(dead_code)]
-    pub fn sessions_dir() -> Result<PathBuf> {
-        let dir = Self::data_dir()?.join("sessions");
-        std::fs::create_dir_all(&dir)?;
-        Ok(dir)
-    }
 }
