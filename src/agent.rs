@@ -11,7 +11,7 @@ use crate::{
     llm::{LlmClient, Message},
     renderer::SharedRenderer,
     terminal::{InputEvent, TerminalState},
-    tools::{self, Tool, execute_tool, execute_tool_streaming, StreamEvent, is_dangerous},
+    tools::{self, ToolRegistry, ToolUpdate, ToolCall, StreamEvent, is_dangerous},
 };
 
 pub struct Agent {
@@ -19,6 +19,7 @@ pub struct Agent {
     renderer: SharedRenderer,
     llm_client: LlmClient,
     history: Vec<Message>,
+    registry: ToolRegistry,
 }
 
 impl Agent {
@@ -28,7 +29,13 @@ impl Agent {
             crate::renderer::DifferentialRenderer::new(config.ui.use_colors)
         ));
         let llm_client = LlmClient::new(config)?;
-        Ok(Self { terminal, renderer, llm_client, history: Vec::new() })
+        Ok(Self { 
+            terminal, 
+            renderer, 
+            llm_client, 
+            history: Vec::new(),
+            registry: ToolRegistry::new(),
+        })
     }
 
     pub async fn run_interactive(&mut self) -> Result<()> {
@@ -150,7 +157,7 @@ impl Agent {
 
             if aborted { return Ok(()); }
 
-            let tools = tools::parse_tools(&full_content);
+            let tools = tools::parse_tools(&full_content, &self.registry);
             if tools.is_empty() {
                 self.history.push(Message::assistant(&full_content));
                 break;
@@ -159,117 +166,62 @@ impl Agent {
             self.history.push(Message::assistant(&full_content));
             let mut all_results = String::new();
 
-            for tool in &tools {
-                match tool {
-                    Tool::Bash { command } => {
-                        if is_dangerous(command) {
-                            let mut r = self.renderer.lock().unwrap();
-                            r.add_error(format!("Refusing dangerous command: {}", command));
-                            r.render();
-                            all_results.push_str(&format!("Command refused: {}\n", command));
-                            continue;
-                        }
+            for tool_call in &tools {
+                if let Some(tool) = self.registry.get(&tool_call.name) {
+                    // Start generic tool timer/spinner
+                    let active = Arc::new(AtomicBool::new(true));
+                    let start = std::time::Instant::now();
+                    let spinner = self.spawn_bash_timer_task(active.clone(), start);
 
-                        // Start bash timer/spinner
-                        let bash_active = Arc::new(AtomicBool::new(true));
-                        let start = std::time::Instant::now();
-                        let bash_spinner = self.spawn_bash_timer_task(bash_active.clone(), start);
-
-                        {
-                            let mut r = self.renderer.lock().unwrap();
-                            r.start_bash(command);
-                        }
-
-                        let (rx, _handle) = execute_tool_streaming(command);
-                        let mut output_lines: Vec<String> = Vec::new();
-                        let mut exit_code: Option<i32> = None;
-                        let mut tool_cancelled = false;
-
-                        loop {
-                            tokio::select! {
-                                Some(event) = input_rx.recv() => {
-                                    match event {
-                                        InputEvent::Cancel => { tool_cancelled = true; break; }
-                                        InputEvent::Shutdown => {
-                                            bash_active.store(false, Ordering::Relaxed);
-                                            return Err(anyhow::anyhow!("Interrupted"));
-                                        }
-                                        _ => {}
-                                    }
-                                }
-                                stream_event = async {
-                                    loop {
-                                        match rx.try_recv() {
-                                            Ok(ev) => return Some(ev),
-                                            Err(std::sync::mpsc::TryRecvError::Empty) => {
-                                                tokio::time::sleep(Duration::from_millis(10)).await;
-                                                return None;
-                                            }
-                                            Err(std::sync::mpsc::TryRecvError::Disconnected) => return None,
-                                        }
-                                    }
-                                } => {
-                                    if let Some(event) = stream_event {
-                                        match event {
-                                            StreamEvent::Stdout(line) | StreamEvent::Stderr(line) => {
-                                                let mut r = self.renderer.lock().unwrap();
-                                                r.push_bash_output(line.clone());
-                                                output_lines.push(line);
-                                            }
-                                            StreamEvent::Done { exit_code: ec } => {
-                                                exit_code = ec;
-                                                break;
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        bash_active.store(false, Ordering::Relaxed);
-                        let _ = bash_spinner.await;
-
-                        let duration = start.elapsed().as_secs_f64();
-                        let success = !tool_cancelled && exit_code == Some(0);
-
-                        {
-                            let mut r = self.renderer.lock().unwrap();
-                            r.clear_input_hint();
-                            r.finalize_bash(duration, success, tool_cancelled);
-                            r.render();
-                        }
-
-                        let output_text = self.renderer.lock().unwrap().last_bash_output();
-                        if tool_cancelled {
-                            all_results.push_str(&format!("$ {}\n{}\n(cancelled)\n", command, output_text));
-                            if !all_results.is_empty() {
-                                self.history.push(Message::user(&format!("Tool output:\n{}", all_results)));
-                            }
-                            return Ok(());
+                    {
+                        let mut r = self.renderer.lock().unwrap();
+                        if tool_call.name == "bash" {
+                            r.start_bash(tool_call.args["command"].as_str().unwrap_or(""));
                         } else {
-                            all_results.push_str(&format!("$ {}\n{}\n", command, output_text));
+                            r.add_tool_call(tool_call.name.clone(), tool_call.args.to_string());
                         }
+                        r.render();
                     }
-                    Tool::ReadFile { path } => {
-                        {
-                            let mut r = self.renderer.lock().unwrap();
-                            r.add_tool_call("read_file".to_string(), path.clone());
-                            r.render();
+
+                    let renderer = self.renderer.clone();
+                    let tool_name = tool_call.name.clone();
+                    
+                    let on_update = Box::new(move |update| {
+                        let mut r = renderer.lock().unwrap();
+                        match update {
+                            ToolUpdate::Stdout(line) | ToolUpdate::Stderr(line) => {
+                                if tool_name == "bash" {
+                                    r.push_bash_output(line);
+                                }
+                            }
+                            ToolUpdate::Status(_status) => {}
                         }
-                        let result = execute_tool(tool)?;
-                        {
-                            let mut r = self.renderer.lock().unwrap();
+                        r.render();
+                    });
+
+                    let result = tool.execute(tool_call.args.clone(), on_update).await?;
+
+                    active.store(false, Ordering::Relaxed);
+                    let _ = spinner.await;
+
+                    {
+                        let mut r = self.renderer.lock().unwrap();
+                        r.clear_input_hint();
+                        if tool_call.name == "bash" {
+                            r.finalize_bash(result.duration_secs, result.success, false);
+                        } else {
                             r.add_tool_result(
-                                "read_file".to_string(),
-                                result.output.clone(),
+                                tool_call.name.clone(),
+                                result.content.clone(),
                                 Some(result.duration_secs),
                                 result.success,
                                 None,
                             );
-                            r.render();
                         }
-                        all_results.push_str(&format!("File: {}\n{}\n", path, result.output));
+                        r.render();
                     }
+
+                    all_results.push_str(&format!("Tool: {}\n{}\n", tool_call.name, result.content));
                 }
             }
 
@@ -331,18 +283,21 @@ impl Agent {
         let cwd = std::env::current_dir()
             .map(|p| p.display().to_string())
             .unwrap_or_else(|_| "unknown".to_string());
+        let os = whoami::distro();
+
+        let mut tools_desc = String::new();
+        for tool in self.registry.list() {
+            tools_desc.push_str(&format!("- ```{}\\nargs```: {}\n", tool.name(), tool.description()));
+        }
 
         format!(
-            r#"You are WAT (Well Assisted Terminal), a command-line assistant.
+            r#"You are WAT, a terminal assistant. 
+
+OS: {} | CWD: {}
 
 Tools:
-- bash: Execute shell commands. Put commands in ```bash code blocks.
-- read_file: Read file contents. Put the file path in a ```read_file code block. Shows line numbers.
-
-Current directory: {}
-
-When asked to do something, use the appropriate tool. Show the tool call you're making."#,
-            cwd
+{}"#,
+            os, cwd, tools_desc
         )
     }
 }
