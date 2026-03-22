@@ -20,7 +20,7 @@
 
 use std::io::{self, Write};
 
-use crate::component::{format_cell_style, Buffer, ComponentId, Size};
+use crate::component::{format_cell_style, Buffer, Component, ComponentId, Size};
 use crate::components::{
     ErrorComponent, ResponseComponent, ToolCallComponent, ToolResultComponent, UserInputComponent,
 };
@@ -144,6 +144,8 @@ pub struct DifferentialRenderer {
     items: Vec<RenderItem>,
     /// Currently executing bash block (None when idle)
     current_bash: Option<BashBlock>,
+    /// Currently streaming response (None when idle)
+    current_response: Option<ResponseComponent>,
     /// Current input lines for rendering
     current_input: Vec<String>,
     /// Cursor row within the multiline input (0-indexed)
@@ -180,6 +182,7 @@ impl DifferentialRenderer {
         Self {
             items: Vec::new(),
             current_bash: None,
+            current_response: None,
             current_input: vec![String::new()],
             input_cursor_row: 0,
             input_cursor_col: 0,
@@ -409,6 +412,31 @@ impl DifferentialRenderer {
         }
     }
 
+    // ── Response streaming ──────────────────────────────────────────────────
+
+    pub fn start_streaming_response(&mut self) {
+        let id = next_component_id();
+        self.current_response = Some(ResponseComponent::new(id, String::new(), self.use_colors));
+    }
+
+    pub fn push_response_chunk(&mut self, chunk: &str) {
+        if let Some(ref mut resp) = self.current_response {
+            if let Some(state) = resp.as_any_mut().downcast_mut::<crate::components::ResponseComponent>() {
+                state.append_content(chunk);
+            }
+        }
+    }
+
+    /// Finalise the streaming response — moves it to history.
+    pub fn finalize_response(&mut self) {
+        if let Some(resp) = self.current_response.take() {
+            let lines = self.component_to_lines(&resp);
+            if !lines.is_empty() {
+                self.items.push(RenderItem::Buffer(lines));
+            }
+        }
+    }
+
     /// Finalise the current bash block — moves it to the completed item list.
     pub fn finalize_bash(&mut self, duration: f64, success: bool, cancelled: bool) {
         if let Some(mut b) = self.current_bash.take() {
@@ -453,14 +481,25 @@ impl DifferentialRenderer {
             lines.push(String::new());
         }
 
-        // Spinner OR Hint (above input box)
-        if let Some(ref s) = self.spinner_text {
-            lines.push(s.clone());
-            lines.push(String::new());
-        } else if let Some(ref h) = self.input_hint {
-            lines.push(h.clone());
-            lines.push(String::new());
+        // Currently streaming response
+        if let Some(ref comp) = self.current_response {
+            let resp_lines = self.component_to_lines(comp);
+            if !resp_lines.is_empty() {
+                lines.extend(resp_lines);
+                lines.push(String::new());
+            }
         }
+
+        // Dedicated status row (Spinner OR Hint) above the input box.
+        // This row is always allocated to prevent the input box from jumping.
+        let status_line = if let Some(ref s) = self.spinner_text {
+            s.clone()
+        } else if let Some(ref h) = self.input_hint {
+            h.clone()
+        } else {
+            String::new()
+        };
+        lines.push(status_line);
 
         // ── Input box (always last) ─────────────────────────────────────────
         let border_str = "─".repeat(width.saturating_sub(1));
@@ -469,13 +508,6 @@ impl DifferentialRenderer {
         } else {
             border_str
         };
-
-        // Ensure there's a blank line before the input box if we have items
-        if !lines.is_empty() && lines.last().map(|l| !l.is_empty()).unwrap_or(false) {
-            lines.push(String::new());
-        } else if lines.is_empty() {
-            lines.push(String::new());
-        }
 
         lines.push(border.clone()); // top border
 

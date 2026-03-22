@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use anyhow::{Result, Context};
 use crate::config::{Config, LlmProvider};
+use futures_util::StreamExt;
+use futures_util::stream::BoxStream;
 
 /// LLM client for different providers
 pub struct LlmClient {
@@ -15,6 +17,7 @@ struct LlmRequest {
     messages: Vec<Message>,
     temperature: f32,
     max_tokens: u32,
+    stream: bool,
 }
 
 /// Message in conversation
@@ -24,99 +27,105 @@ pub struct Message {
     pub content: String,
 }
 
-/// LLM response
+/// Streaming delta for OpenAI/Custom
 #[derive(Debug, Deserialize)]
-struct LlmResponse {
-    choices: Vec<Choice>,
-    #[allow(dead_code)]
-    usage: Option<Usage>,
+struct StreamResponse {
+    choices: Vec<StreamChoice>,
 }
 
-/// Choice in response
 #[derive(Debug, Deserialize)]
-struct Choice {
-    message: Message,
-    #[allow(dead_code)]
-    finish_reason: String,
+struct StreamChoice {
+    delta: StreamDelta,
 }
 
-/// Token usage
 #[derive(Debug, Deserialize)]
-struct Usage {
-    #[allow(dead_code)]
-    prompt_tokens: u32,
-    #[allow(dead_code)]
-    completion_tokens: u32,
-    #[allow(dead_code)]
-    total_tokens: u32,
+struct StreamDelta {
+    content: Option<String>,
 }
 
 impl LlmClient {
-    /// Create new LLM client
     pub fn new(config: Config) -> Result<Self> {
         let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
+            .timeout(std::time::Duration::from_secs(60))
             .build()
             .context("Failed to create HTTP client")?;
         
         Ok(Self { config, client })
     }
     
-    /// Send a query to the LLM
-    pub async fn query(&self, messages: Vec<Message>) -> Result<Message> {
-        match self.config.llm.provider {
-            LlmProvider::OpenAI => self.query_openai(messages).await,
-            LlmProvider::Anthropic => self.query_anthropic(messages).await,
-            LlmProvider::Local => self.query_local(messages).await,
-            LlmProvider::Custom => self.query_custom(messages).await,
+    pub async fn query_stream(&self, messages: Vec<Message>) -> Result<BoxStream<'static, Result<String>>> {
+        let provider = self.config.llm.provider;
+        let client = self.client.clone();
+        let config = self.config.clone();
+
+        match provider {
+            LlmProvider::OpenAI | LlmProvider::Custom => {
+                let s = Self::stream_openai(client, config, messages).await?;
+                Ok(s.boxed())
+            }
+            LlmProvider::Anthropic => {
+                let s = Self::stream_anthropic(client, config, messages).await?;
+                Ok(s.boxed())
+            }
+            LlmProvider::Local => anyhow::bail!("Local LLM streaming not implemented"),
         }
     }
-    
-    /// Query OpenAI API
-    async fn query_openai(&self, messages: Vec<Message>) -> Result<Message> {
-        let url = self.config.llm.base_url
+
+    async fn stream_openai(client: reqwest::Client, config: Config, messages: Vec<Message>) -> Result<impl futures_util::Stream<Item = Result<String>>> {
+        let url = config.llm.base_url
             .clone()
             .unwrap_or_else(|| "https://api.openai.com/v1/chat/completions".to_string());
         
         let request = LlmRequest {
-            model: self.config.llm.model.clone(),
+            model: config.llm.model.clone(),
             messages,
-            temperature: self.config.llm.temperature,
-            max_tokens: self.config.llm.max_tokens,
+            temperature: config.llm.temperature,
+            max_tokens: config.llm.max_tokens,
+            stream: true,
         };
         
-        let response = self.client
+        let response = client
             .post(&url)
-            .header("Authorization", format!("Bearer {}", self.config.llm.api_key))
+            .header("Authorization", format!("Bearer {}", config.llm.api_key))
             .header("Content-Type", "application/json")
             .json(&request)
             .send()
             .await
-            .context("Failed to send request to OpenAI")?;
+            .context("Failed to send request")?;
         
         if !response.status().is_success() {
             let error_text = response.text().await.unwrap_or_default();
-            anyhow::bail!("OpenAI API error: {}", error_text);
+            anyhow::bail!("API error: {}", error_text);
         }
-        
-        let llm_response: LlmResponse = response.json()
-            .await
-            .context("Failed to parse OpenAI response")?;
-        
-        if llm_response.choices.is_empty() {
-            anyhow::bail!("No choices in OpenAI response");
-        }
-        
-        Ok(llm_response.choices[0].message.clone())
+
+        let stream = response.bytes_stream().map(|item| {
+            let chunk = item.context("Failed to read stream chunk")?;
+            let text = String::from_utf8_lossy(&chunk).to_string();
+            let mut result = String::new();
+
+            for line in text.lines() {
+                let line = line.trim();
+                if line.starts_with("data: ") {
+                    let data = line.trim_start_matches("data: ").trim();
+                    if data == "[DONE]" { continue; }
+                    if let Ok(parsed) = serde_json::from_str::<StreamResponse>(data) {
+                        if let Some(content) = &parsed.choices[0].delta.content {
+                            result.push_str(content);
+                        }
+                    }
+                }
+            }
+            Ok(result)
+        });
+
+        Ok(stream)
     }
-    
-    /// Query Anthropic API
-    async fn query_anthropic(&self, messages: Vec<Message>) -> Result<Message> {
-        let url = self.config.llm.base_url
+
+    async fn stream_anthropic(client: reqwest::Client, config: Config, messages: Vec<Message>) -> Result<impl futures_util::Stream<Item = Result<String>>> {
+        let url = config.llm.base_url
             .clone()
             .unwrap_or_else(|| "https://api.anthropic.com/v1/messages".to_string());
         
-        // Convert messages to Anthropic format
         let anthropic_messages: Vec<AnthropicMessage> = messages
             .into_iter()
             .map(|m| AnthropicMessage {
@@ -125,16 +134,17 @@ impl LlmClient {
             })
             .collect();
         
-        let request = AnthropicRequest {
-            model: self.config.llm.model.clone(),
+        let request = AnthropicStreamRequest {
+            model: config.llm.model.clone(),
             messages: anthropic_messages,
-            max_tokens: self.config.llm.max_tokens,
-            temperature: self.config.llm.temperature,
+            max_tokens: config.llm.max_tokens,
+            temperature: config.llm.temperature,
+            stream: true,
         };
         
-        let response = self.client
+        let response = client
             .post(&url)
-            .header("x-api-key", &self.config.llm.api_key)
+            .header("x-api-key", &config.llm.api_key)
             .header("anthropic-version", "2023-06-01")
             .header("Content-Type", "application/json")
             .json(&request)
@@ -144,80 +154,52 @@ impl LlmClient {
         
         if !response.status().is_success() {
             let error_text = response.text().await.unwrap_or_default();
-            anyhow::bail!("Anthropic API error: {}", error_text);
+            anyhow::bail!("Anthropic error: {}", error_text);
         }
-        
-        let anthropic_response: AnthropicResponse = response.json()
-            .await
-            .context("Failed to parse Anthropic response")?;
-        
-        Ok(Message {
-            role: "assistant".to_string(),
-            content: anthropic_response.content
-                .into_iter()
-                .filter_map(|c| match c {
-                    AnthropicContentResponse::Text { text } => Some(text),
-                })
-                .collect::<Vec<String>>()
-                .join("\n"),
-        })
+
+        let stream = response.bytes_stream().map(|item| {
+            let chunk = item.context("Failed to read Anthropic chunk")?;
+            let text = String::from_utf8_lossy(&chunk).to_string();
+            let mut result = String::new();
+
+            for line in text.lines() {
+                let line = line.trim();
+                if line.starts_with("data: ") {
+                    let data = line.trim_start_matches("data: ").trim();
+                    if let Ok(parsed) = serde_json::from_str::<AnthropicStreamEvent>(data) {
+                        match parsed {
+                            AnthropicStreamEvent::ContentBlockDelta { delta } => {
+                                result.push_str(&delta.text);
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            Ok(result)
+        });
+
+        Ok(stream)
     }
-    
-    /// Query local LLM (simplified)
-    async fn query_local(&self, _messages: Vec<Message>) -> Result<Message> {
-        // For local models, you'd connect to Ollama, LM Studio, etc.
-        // This is a placeholder implementation
-        
-        anyhow::bail!("Local LLM not yet implemented");
-    }
-    
-    /// Query custom LLM endpoint
-    async fn query_custom(&self, messages: Vec<Message>) -> Result<Message> {
-        let url = self.config.llm.base_url
-            .clone()
-            .context("Custom LLM requires base_url")?;
-        
-        // Assume OpenAI-compatible API
-        let request = LlmRequest {
-            model: self.config.llm.model.clone(),
-            messages,
-            temperature: self.config.llm.temperature,
-            max_tokens: self.config.llm.max_tokens,
-        };
-        
-        let response = self.client
-            .post(&url)
-            .header("Authorization", format!("Bearer {}", self.config.llm.api_key))
-            .header("Content-Type", "application/json")
-            .json(&request)
-            .send()
-            .await
-            .context("Failed to send request to custom LLM")?;
-        
-        if !response.status().is_success() {
-            let error_text = response.text().await.unwrap_or_default();
-            anyhow::bail!("Custom LLM API error: {}", error_text);
+
+    pub async fn query(&self, messages: Vec<Message>) -> Result<Message> {
+        let mut stream = self.query_stream(messages).await?;
+        let mut full_content = String::new();
+        while let Some(chunk) = stream.next().await {
+            full_content.push_str(&chunk?);
         }
-        
-        let llm_response: LlmResponse = response.json()
-            .await
-            .context("Failed to parse custom LLM response")?;
-        
-        if llm_response.choices.is_empty() {
-            anyhow::bail!("No choices in custom LLM response");
-        }
-        
-        Ok(llm_response.choices[0].message.clone())
+        Ok(Message::assistant(&full_content))
     }
 }
 
-/// Anthropic-specific types
+/// Anthropic types
 #[derive(Debug, Serialize)]
-struct AnthropicRequest {
+struct AnthropicStreamRequest {
     model: String,
     messages: Vec<AnthropicMessage>,
     max_tokens: u32,
     temperature: f32,
+    stream: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -234,40 +216,37 @@ enum AnthropicContent {
 }
 
 #[derive(Debug, Deserialize)]
-struct AnthropicResponse {
-    content: Vec<AnthropicContentResponse>,
+#[serde(tag = "type")]
+enum AnthropicStreamEvent {
+    #[serde(rename = "message_start")]
+    MessageStart {},
+    #[serde(rename = "content_block_start")]
+    ContentBlockStart {},
+    #[serde(rename = "content_block_delta")]
+    ContentBlockDelta { delta: AnthropicDelta },
+    #[serde(rename = "content_block_stop")]
+    ContentBlockStop {},
+    #[serde(rename = "message_delta")]
+    MessageDelta {},
+    #[serde(rename = "message_stop")]
+    MessageStop {},
+    #[serde(rename = "ping")]
+    Ping {},
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(tag = "type")]
-enum AnthropicContentResponse {
-    #[serde(rename = "text")]
-    Text { text: String },
+struct AnthropicDelta {
+    text: String,
 }
 
-/// Helper functions for message creation
 impl Message {
-    /// Create system message
     pub fn system(content: &str) -> Self {
-        Self {
-            role: "system".to_string(),
-            content: content.to_string(),
-        }
+        Self { role: "system".to_string(), content: content.to_string() }
     }
-    
-    /// Create user message
     pub fn user(content: &str) -> Self {
-        Self {
-            role: "user".to_string(),
-            content: content.to_string(),
-        }
+        Self { role: "user".to_string(), content: content.to_string() }
     }
-    
-    /// Create assistant message
     pub fn assistant(content: &str) -> Self {
-        Self {
-            role: "assistant".to_string(),
-            content: content.to_string(),
-        }
+        Self { role: "assistant".to_string(), content: content.to_string() }
     }
 }

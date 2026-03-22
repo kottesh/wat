@@ -1,7 +1,8 @@
-//! Main agent — conversation loop with asynchronous input handling.
+//! Main agent — conversation loop with decoupled background rendering.
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}};
 use std::time::Duration;
+use futures_util::StreamExt;
 
 use anyhow::Result;
 
@@ -10,7 +11,7 @@ use crate::{
     llm::{LlmClient, Message},
     renderer::SharedRenderer,
     terminal::{InputEvent, TerminalState},
-    tools::{self, Tool, execute_tool, execute_tool_streaming, is_dangerous, StreamEvent},
+    tools::{self, Tool, execute_tool, execute_tool_streaming, StreamEvent, is_dangerous},
 };
 
 pub struct Agent {
@@ -32,18 +33,13 @@ impl Agent {
 
     pub async fn run_interactive(&mut self) -> Result<()> {
         self.terminal.enter_raw_mode()?;
-        
-        // Spawn the dedicated background input thread
         let mut input_rx = self.terminal.spawn_input_handler(self.renderer.clone());
-        
         let result = self.main_loop(&mut input_rx).await;
-        
         let _ = self.terminal.exit_raw_mode();
         result
     }
 
     async fn main_loop(&mut self, input_rx: &mut tokio::sync::mpsc::Receiver<InputEvent>) -> Result<()> {
-        // Initial draw
         self.renderer.lock().unwrap().render();
 
         loop {
@@ -51,18 +47,12 @@ impl Agent {
                 Some(event) = input_rx.recv() => {
                     match event {
                         InputEvent::Shutdown => return Ok(()),
-                        InputEvent::Cancel => {
-                             // ESC while idle: just refresh
-                             self.renderer.lock().unwrap().render();
-                        }
+                        InputEvent::Cancel => { self.renderer.lock().unwrap().render(); }
                         InputEvent::Submit(raw) => {
                             let input = raw.trim().to_string();
                             if input.is_empty() { continue; }
-                            if input == "exit" || input == "quit" || input == "q" {
-                                return Ok(());
-                            }
+                            if input == "exit" || input == "quit" || input == "q" { return Ok(()); }
 
-                            // Commit typed line to history view
                             {
                                 let mut r = self.renderer.lock().unwrap();
                                 r.add_user_input(input.clone());
@@ -98,62 +88,75 @@ impl Agent {
             let mut messages = vec![Message::system(&system)];
             messages.extend(self.history.clone());
 
-            // ── LLM query with concurrent animated spinner ───────────────────
-            let frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-            let mut idx = 0usize;
+            // ── Start background spinner ─────────────────────────────────────
+            let spinner_active = Arc::new(AtomicBool::new(true));
+            let spinner_label = Arc::new(Mutex::new("Thinking...".to_string()));
+            let spinner_handle = self.spawn_spinner_task(spinner_active.clone(), spinner_label.clone());
 
-            let query_fut = self.llm_client.query(messages);
-            tokio::pin!(query_fut);
+            // ── LLM query with streaming ─────────────────────────────────────
+            let mut stream = self.llm_client.query_stream(messages).await?;
+            let mut full_content = String::new();
+            
+            {
+                let mut r = self.renderer.lock().unwrap();
+                r.start_streaming_response();
+            }
 
-            let response = loop {
+            let mut first_chunk = true;
+            let aborted = loop {
                 tokio::select! {
-                    r = &mut query_fut => break r,
-                    // Handle shutdown/cancel while waiting for LLM
-                    Some(event) = input_rx.recv() => {
-                        match event {
-                            InputEvent::Shutdown => return Err(anyhow::anyhow!("Interrupted")),
-                            InputEvent::Cancel => {
-                                // Abort the agent turn
-                                return Ok(());
+                    chunk = stream.next() => {
+                        match chunk {
+                            Some(Ok(text)) => {
+                                if first_chunk {
+                                    *spinner_label.lock().unwrap() = "Responding...".to_string();
+                                    first_chunk = false;
+                                }
+                                full_content.push_str(&text);
+                                let mut r = self.renderer.lock().unwrap();
+                                r.push_response_chunk(&text);
+                                r.render();
                             }
-                            _ => {} // Typing is handled by background thread
+                            None => break false, 
+                            Some(Err(e)) => {
+                                spinner_active.store(false, Ordering::Relaxed);
+                                let _ = spinner_handle.await;
+                                return Err(e);
+                            }
                         }
                     }
-                    _ = tokio::time::sleep(Duration::from_millis(80)) => {
-                        let mut r = self.renderer.lock().unwrap();
-                        let frame = frames[idx];
-                        let text = if r.use_colors() {
-                            format!("  \x1b[96m{}\x1b[0m \x1b[2mThinking...\x1b[0m", frame)
-                        } else {
-                            format!("  {} Thinking...", frame)
-                        };
-                        r.set_spinner(text);
-                        r.render();
-                        idx = (idx + 1) % frames.len();
+                    Some(event) = input_rx.recv() => {
+                        match event {
+                            InputEvent::Shutdown => {
+                                spinner_active.store(false, Ordering::Relaxed);
+                                return Err(anyhow::anyhow!("Interrupted"));
+                            }
+                            InputEvent::Cancel => break true,
+                            _ => {}
+                        }
                     }
                 }
             };
 
-            self.renderer.lock().unwrap().clear_spinner();
-            let response = response?;
-            let tools = tools::parse_tools(&response.content);
+            spinner_active.store(false, Ordering::Relaxed);
+            let _ = spinner_handle.await;
 
-            if tools.is_empty() {
-                self.history.push(Message::assistant(&response.content));
+            {
                 let mut r = self.renderer.lock().unwrap();
-                r.add_response(response.content);
+                r.clear_spinner();
+                r.finalize_response();
                 r.render();
+            }
+
+            if aborted { return Ok(()); }
+
+            let tools = tools::parse_tools(&full_content);
+            if tools.is_empty() {
+                self.history.push(Message::assistant(&full_content));
                 break;
             }
 
-            let display = tools::strip_tool_blocks(&response.content);
-            if !display.is_empty() {
-                let mut r = self.renderer.lock().unwrap();
-                r.add_response(display);
-                r.render();
-            }
-            self.history.push(Message::assistant(&response.content));
-
+            self.history.push(Message::assistant(&full_content));
             let mut all_results = String::new();
 
             for tool in &tools {
@@ -167,49 +170,39 @@ impl Agent {
                             continue;
                         }
 
-                        // Start bash block
+                        // Start bash timer/spinner
+                        let bash_active = Arc::new(AtomicBool::new(true));
+                        let start = std::time::Instant::now();
+                        let bash_spinner = self.spawn_bash_timer_task(bash_active.clone(), start);
+
                         {
                             let mut r = self.renderer.lock().unwrap();
-                            let hint = if r.use_colors() {
-                                "  \x1b[2mesc to cancel\x1b[0m".to_string()
-                            } else {
-                                "  esc to cancel".to_string()
-                            };
-                            r.set_input_hint(hint);
                             r.start_bash(command);
-                            r.render();
                         }
 
                         let (rx, _handle) = execute_tool_streaming(command);
-                        let start = std::time::Instant::now();
                         let mut output_lines: Vec<String> = Vec::new();
                         let mut exit_code: Option<i32> = None;
-                        let mut cancelled = false;
+                        let mut tool_cancelled = false;
 
-                        // Unified streaming + input loop
                         loop {
                             tokio::select! {
                                 Some(event) = input_rx.recv() => {
                                     match event {
-                                        InputEvent::Cancel => {
-                                            cancelled = true;
-                                            break;
+                                        InputEvent::Cancel => { tool_cancelled = true; break; }
+                                        InputEvent::Shutdown => {
+                                            bash_active.store(false, Ordering::Relaxed);
+                                            return Err(anyhow::anyhow!("Interrupted"));
                                         }
-                                        InputEvent::Shutdown => return Err(anyhow::anyhow!("Interrupted")),
                                         _ => {}
                                     }
                                 }
                                 stream_event = async {
-                                    // Use a non-blocking try_recv in a tight loop with small sleep
-                                    // or just wait on the mpsc channel if we refactor tools.rs.
-                                    // For now, we bridge the std::sync::mpsc with a sleep.
                                     loop {
                                         match rx.try_recv() {
                                             Ok(ev) => return Some(ev),
                                             Err(std::sync::mpsc::TryRecvError::Empty) => {
                                                 tokio::time::sleep(Duration::from_millis(10)).await;
-                                                // We must return None occasionally to let select!
-                                                // check the input_rx and timer.
                                                 return None;
                                             }
                                             Err(std::sync::mpsc::TryRecvError::Disconnected) => return None,
@@ -221,7 +214,6 @@ impl Agent {
                                             StreamEvent::Stdout(line) | StreamEvent::Stderr(line) => {
                                                 let mut r = self.renderer.lock().unwrap();
                                                 r.push_bash_output(line.clone());
-                                                r.render();
                                                 output_lines.push(line);
                                             }
                                             StreamEvent::Done { exit_code: ec } => {
@@ -230,39 +222,30 @@ impl Agent {
                                             }
                                         }
                                     }
-                                    // Periodic timer update
-                                    let mut r = self.renderer.lock().unwrap();
-                                    let secs = start.elapsed().as_secs_f64();
-                                    let hint = if r.use_colors() {
-                                        format!("  \x1b[2mesc to cancel  {:.1}s\x1b[0m", secs)
-                                    } else {
-                                        format!("  esc to cancel  {:.1}s", secs)
-                                    };
-                                    r.set_input_hint(hint);
-                                    r.set_bash_elapsed(secs);
-                                    r.render();
                                 }
                             }
                         }
 
+                        bash_active.store(false, Ordering::Relaxed);
+                        let _ = bash_spinner.await;
+
                         let duration = start.elapsed().as_secs_f64();
-                        let success = !cancelled && exit_code == Some(0);
+                        let success = !tool_cancelled && exit_code == Some(0);
 
                         {
                             let mut r = self.renderer.lock().unwrap();
                             r.clear_input_hint();
-                            r.finalize_bash(duration, success, cancelled);
+                            r.finalize_bash(duration, success, tool_cancelled);
                             r.render();
                         }
 
                         let output_text = self.renderer.lock().unwrap().last_bash_output();
-                        if cancelled {
+                        if tool_cancelled {
                             all_results.push_str(&format!("$ {}\n{}\n(cancelled)\n", command, output_text));
-                            // Add results to history so far before aborting
                             if !all_results.is_empty() {
                                 self.history.push(Message::user(&format!("Tool output:\n{}", all_results)));
                             }
-                            return Ok(()); // Abort the whole agent turn
+                            return Ok(());
                         } else {
                             all_results.push_str(&format!("$ {}\n{}\n", command, output_text));
                         }
@@ -296,6 +279,52 @@ impl Agent {
         }
 
         Ok(())
+    }
+
+    fn spawn_spinner_task(&self, active: Arc<AtomicBool>, label: Arc<Mutex<String>>) -> tokio::task::JoinHandle<()> {
+        let renderer = self.renderer.clone();
+        tokio::spawn(async move {
+            let frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+            let mut idx = 0usize;
+            while active.load(Ordering::Relaxed) {
+                {
+                    let mut r = renderer.lock().unwrap();
+                    if !active.load(Ordering::Relaxed) { break; }
+                    let frame = frames[idx];
+                    let current_label = label.lock().unwrap().clone();
+                    let text = if r.use_colors() {
+                        format!("  \x1b[96m{}\x1b[0m \x1b[2m{}\x1b[0m", frame, current_label)
+                    } else {
+                        format!("  {} {}", frame, current_label)
+                    };
+                    r.set_spinner(text);
+                    r.render();
+                }
+                idx = (idx + 1) % frames.len();
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+    }
+
+    fn spawn_bash_timer_task(&self, active: Arc<AtomicBool>, start: std::time::Instant) -> tokio::task::JoinHandle<()> {
+        let renderer = self.renderer.clone();
+        tokio::spawn(async move {
+            while active.load(Ordering::Relaxed) {
+                {
+                    let mut r = renderer.lock().unwrap();
+                    let secs = start.elapsed().as_secs_f64();
+                    let hint = if r.use_colors() {
+                        format!("  \x1b[2mesc to cancel  {:.1}s\x1b[0m", secs)
+                    } else {
+                        format!("  esc to cancel  {:.1}s", secs)
+                    };
+                    r.set_input_hint(hint);
+                    r.set_bash_elapsed(secs);
+                    r.render();
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
     }
 
     fn system_prompt(&self) -> String {

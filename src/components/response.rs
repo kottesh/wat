@@ -2,6 +2,8 @@
 
 use crate::component::{Buffer, Color, Component, ComponentId, Modifiers};
 
+use std::cell::RefCell;
+
 /// State for the response component
 #[derive(Debug, Clone, PartialEq)]
 pub struct ResponseState {
@@ -13,6 +15,7 @@ pub struct ResponseState {
 #[derive(Debug)]
 pub struct ResponseComponent {
     state: ResponseState,
+    cached_lines: RefCell<Option<(u16, Vec<StyledLine>)>>,
 }
 
 impl ResponseComponent {
@@ -20,41 +23,42 @@ impl ResponseComponent {
     pub fn new(_id: ComponentId, content: String, use_colors: bool) -> Self {
         Self {
             state: ResponseState { content, use_colors },
+            cached_lines: RefCell::new(None),
         }
+    }
+
+    pub fn append_content(&mut self, chunk: &str) {
+        self.state.content.push_str(chunk);
+        *self.cached_lines.borrow_mut() = None;
     }
 
     /// Simple markdown parsing - identifies headers, code blocks, etc.
     fn parse_markdown(&self, width: u16) -> Vec<StyledLine> {
+        if let Some((w, ref lines)) = *self.cached_lines.borrow() {
+            if w == width {
+                return lines.clone();
+            }
+        }
+
         let mut lines = Vec::new();
         let max_width = (width as usize).saturating_sub(4); // Account for padding
 
         let mut in_code_block = false;
-        let mut code_content = String::new();
 
         for line in self.state.content.lines() {
             // Handle code blocks
             if line.trim().starts_with("```") {
-                if in_code_block {
-                    // End of code block - output accumulated code
-                    for code_line in code_content.lines() {
-                        lines.push(StyledLine {
-                            text: format!("  {}", code_line),
-                            fg: Color::Ansi(2), // Green for code
-                            bg: Color::Default,
-                            modifiers: Modifiers::default(),
-                        });
-                    }
-                    code_content.clear();
-                    in_code_block = false;
-                } else {
-                    in_code_block = true;
-                }
+                in_code_block = !in_code_block;
                 continue;
             }
 
             if in_code_block {
-                code_content.push_str(line);
-                code_content.push('\n');
+                lines.push(StyledLine {
+                    text: format!("  {}", line),
+                    fg: Color::Ansi(2), // Green for code
+                    bg: Color::Default,
+                    modifiers: Modifiers::default(),
+                });
                 continue;
             }
 
@@ -103,6 +107,7 @@ impl ResponseComponent {
             }
         }
 
+        *self.cached_lines.borrow_mut() = Some((width, lines.clone()));
         lines
     }
 
@@ -146,6 +151,7 @@ impl ResponseComponent {
 }
 
 /// A line with styling information
+#[derive(Debug, Clone)]
 struct StyledLine {
     text: String,
     fg: Color,

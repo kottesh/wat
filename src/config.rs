@@ -24,7 +24,7 @@ pub struct LlmConfig {
 }
 
 /// LLM provider
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum LlmProvider {
     OpenAI,
     Anthropic,
