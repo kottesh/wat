@@ -69,6 +69,54 @@ impl ToolResultComponent {
             all_lines
         }
     }
+
+    fn calculate_content_height(&self, width: u16) -> u16 {
+        if width == 0 {
+            return 0;
+        }
+
+        let display_lines = self.get_display_lines();
+        let mut content_rows = 0u16;
+
+        let wrap_count = |text_len: usize, prefix: usize| -> u16 {
+            let total_len = text_len + prefix;
+            if total_len == 0 { return 1; }
+            std::cmp::max(1, (total_len as u16 + width - 1) / width)
+        };
+
+        if self.is_bash() && self.state.use_colors {
+            if let Some(ref cmd) = self.state.command {
+                content_rows += wrap_count(cmd.chars().count(), 4);
+            }
+            for line in &display_lines {
+                content_rows += wrap_count(line.chars().count(), 2);
+            }
+            if let Some(duration) = self.state.duration_secs {
+                let timing_text = format!("Took {:.1}s", duration);
+                content_rows += wrap_count(timing_text.chars().count(), 0);
+            }
+        } else if self.is_read_file() && self.state.use_colors {
+            for line in &display_lines {
+                content_rows += wrap_count(line.chars().count(), 2);
+            }
+            if let Some(duration) = self.state.duration_secs {
+                content_rows += 1;
+                let timing_text = format!("  Took {:.1}s", duration);
+                content_rows += wrap_count(timing_text.chars().count(), 0);
+            }
+        } else {
+            for line in &display_lines {
+                content_rows += wrap_count(line.chars().count(), 0);
+            }
+            if let Some(duration) = self.state.duration_secs {
+                content_rows += 1;
+                let timing_text = format!(" Took {:.1}s", duration);
+                content_rows += wrap_count(timing_text.chars().count(), 0);
+            }
+        }
+
+        content_rows
+    }
 }
 
 impl Component for ToolResultComponent {
@@ -109,27 +157,7 @@ impl Component for ToolResultComponent {
             Color::Default
         };
 
-        // Calculate height: top pad + content rows + bottom pad
-        let mut content_rows = 0u16;
-
-        if self.is_bash() {
-            if self.state.command.is_some() {
-                content_rows += 1; // command
-            }
-            content_rows += display_lines.len() as u16; // output
-            content_rows += 1; // took Xs
-        } else if self.is_read_file() {
-            content_rows += display_lines.len() as u16;
-            if self.state.duration_secs.is_some() {
-                content_rows += 2; // timing + padding above it
-            }
-        } else {
-            content_rows += display_lines.len() as u16;
-            if self.state.duration_secs.is_some() {
-                content_rows += 1;
-            }
-        }
-
+        let content_rows = self.calculate_content_height(width);
         let height = content_rows + 2;
 
         let mut buffer = Buffer::new(width, height as u16);
@@ -140,7 +168,12 @@ impl Component for ToolResultComponent {
 
             // Command line
             if let Some(ref cmd) = self.state.command {
-                buffer.fill_row(current_row, bg_color);
+                let cmd_text = format!("  $ {}", cmd);
+                let text_len = cmd_text.chars().count() as u16;
+                let rows = std::cmp::max(1, (text_len + width - 1) / width);
+                for r in current_row..current_row + rows {
+                    if r < height { buffer.fill_row(r, bg_color); }
+                }
                 buffer.write_str(
                     current_row,
                     0,
@@ -149,7 +182,7 @@ impl Component for ToolResultComponent {
                     bg_color,
                     Modifiers::default(),
                 );
-                buffer.write_str(
+                current_row = buffer.write_str(
                     current_row,
                     4,
                     cmd,
@@ -157,14 +190,17 @@ impl Component for ToolResultComponent {
                     bg_color,
                     Modifiers::bold(),
                 );
-                current_row += 1;
             }
 
             // Output lines
             for line in &display_lines {
-                buffer.fill_row(current_row, bg_color);
                 let text = format!("  {}", line);
-                buffer.write_str(
+                let text_len = std::cmp::max(1, text.chars().count());
+                let rows = std::cmp::max(1, (text_len as u16 + width - 1) / width);
+                for r in current_row..current_row + rows {
+                    if r < height { buffer.fill_row(r, bg_color); }
+                }
+                current_row = buffer.write_str(
                     current_row,
                     0,
                     &text,
@@ -172,14 +208,17 @@ impl Component for ToolResultComponent {
                     bg_color,
                     Modifiers::default(),
                 );
-                current_row += 1;
             }
 
             // Timing
             if let Some(duration) = self.state.duration_secs {
-                buffer.fill_row(current_row, bg_color);
                 let timing_text = format!("Took {:.1}s", duration);
-                buffer.write_str(
+                let text_len = std::cmp::max(1, timing_text.chars().count());
+                let rows = std::cmp::max(1, (text_len as u16 + width - 1) / width);
+                for r in current_row..current_row + rows {
+                    if r < height { buffer.fill_row(r, bg_color); }
+                }
+                current_row = buffer.write_str(
                     current_row,
                     0,
                     &timing_text,
@@ -187,11 +226,10 @@ impl Component for ToolResultComponent {
                     bg_color,
                     Modifiers::default(),
                 );
-                current_row += 1;
             }
 
             // Bottom padding
-            if current_row < height as u16 {
+            if current_row < height {
                 buffer.fill_row(current_row, bg_color);
             }
         } else if self.is_read_file() && self.state.use_colors {
@@ -203,9 +241,13 @@ impl Component for ToolResultComponent {
 
             // Content lines
             for line in &display_lines {
-                buffer.fill_row(current_row, bg_color);
                 let text = format!("  {}", line);
-                buffer.write_str(
+                let text_len = std::cmp::max(1, text.chars().count());
+                let rows = std::cmp::max(1, (text_len as u16 + width - 1) / width);
+                for r in current_row..current_row + rows {
+                    if r < height { buffer.fill_row(r, bg_color); }
+                }
+                current_row = buffer.write_str(
                     current_row,
                     0,
                     &text,
@@ -213,20 +255,23 @@ impl Component for ToolResultComponent {
                     bg_color,
                     Modifiers::default(),
                 );
-                current_row += 1;
             }
 
             // Padding above timing
             if self.state.duration_secs.is_some() {
-                buffer.fill_row(current_row, bg_color);
+                if current_row < height { buffer.fill_row(current_row, bg_color); }
                 current_row += 1;
             }
 
             // Timing (inside background)
             if let Some(duration) = self.state.duration_secs {
-                buffer.fill_row(current_row, bg_color);
                 let timing_text = format!("  Took {:.1}s", duration);
-                buffer.write_str(
+                let text_len = std::cmp::max(1, timing_text.chars().count());
+                let rows = std::cmp::max(1, (text_len as u16 + width - 1) / width);
+                for r in current_row..current_row + rows {
+                    if r < height { buffer.fill_row(r, bg_color); }
+                }
+                current_row = buffer.write_str(
                     current_row,
                     0,
                     &timing_text,
@@ -234,11 +279,10 @@ impl Component for ToolResultComponent {
                     bg_color,
                     Modifiers::default(),
                 );
-                current_row += 1;
             }
 
             // Bottom padding
-            if current_row < height as u16 {
+            if current_row < height {
                 buffer.fill_row(current_row, bg_color);
             }
         } else {
@@ -250,16 +294,15 @@ impl Component for ToolResultComponent {
             };
 
             for line in &display_lines {
-                buffer.write_str(current_row, 0, line, fg, bg_color, Modifiers::default());
-                current_row += 1;
+                current_row = buffer.write_str(current_row, 0, line, fg, bg_color, Modifiers::default());
             }
 
             // Timing
             if let Some(duration) = self.state.duration_secs {
                 current_row += 1; // Empty line
                 let timing_text = format!(" Took {:.1}s", duration);
-                if current_row < height as u16 {
-                    buffer.write_str(
+                if current_row < height {
+                    current_row = buffer.write_str(
                         current_row,
                         0,
                         &timing_text,
@@ -267,12 +310,11 @@ impl Component for ToolResultComponent {
                         Color::Default,
                         Modifiers::default(),
                     );
-                    current_row += 1;
                 }
             }
 
             // Bottom padding
-            buffer.fill_row(current_row, bg_color);
+            if current_row < height { buffer.fill_row(current_row, bg_color); }
         }
 
         buffer
@@ -283,28 +325,7 @@ impl Component for ToolResultComponent {
             return 0;
         }
 
-        let display_lines = self.get_display_lines();
-        let mut content_rows = 0u16;
-
-        if self.is_bash() {
-            if self.state.command.is_some() {
-                content_rows += 1;
-            }
-            content_rows += display_lines.len() as u16;
-            content_rows += 1; // took Xs
-        } else if self.is_read_file() {
-            content_rows += display_lines.len() as u16;
-            if self.state.duration_secs.is_some() {
-                content_rows += 1;
-            }
-        } else {
-            content_rows += display_lines.len() as u16;
-            if self.state.duration_secs.is_some() {
-                content_rows += 1;
-            }
-        }
-
-        content_rows + 2
+        self.calculate_content_height(width) + 2
     }
 
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any {

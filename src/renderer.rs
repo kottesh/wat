@@ -105,13 +105,37 @@ impl BashBlock {
         let mut lines = Vec::new();
         let empty = " ".repeat(width);
 
+        let mut wrap_text = |text: &str| -> Vec<String> {
+            let mut result = Vec::new();
+            let mut current_line = String::new();
+            let mut current_width = 0;
+            
+            for c in text.chars() {
+                let cw = 1; // Simplification
+                if current_width + cw > width {
+                    result.push(current_line);
+                    current_line = String::new();
+                    current_width = 0;
+                }
+                current_line.push(c);
+                current_width += cw;
+            }
+            if !current_line.is_empty() || result.is_empty() {
+                result.push(current_line);
+            }
+            result
+        };
+
         // top padding
         lines.push(format!("{}{}{}", bg, empty, reset));
 
         // command
         let cmd = format!("  $ {}", self.command);
-        let cmd_padded = format!("{}{}", cmd, pad(&cmd));
-        lines.push(format!("{}{}{}{}", bg, bold, cmd_padded, reset));
+        let wrapped_cmds = wrap_text(&cmd);
+        for wc in wrapped_cmds {
+            let cmd_padded = format!("{}{}", wc, pad(&wc));
+            lines.push(format!("{}{}{}{}", bg, bold, cmd_padded, reset));
+        }
 
         // gap
         lines.push(format!("{}{}{}", bg, empty, reset));
@@ -119,24 +143,10 @@ impl BashBlock {
         // output lines
         for l in &display_lines {
             let content = format!("  {}", l);
-            // Truncate content to width to prevent wrapping
-            let truncated = if crate::renderer::visible_width(&content) > width {
-                let mut t = String::new();
-                let mut w = 0;
-                for c in content.chars() {
-                    let cw = 1; // Simplification
-                    if w + cw > width.saturating_sub(3) {
-                        t.push_str("...");
-                        break;
-                    }
-                    t.push(c);
-                    w += cw;
-                }
-                t
-            } else {
-                content
-            };
-            lines.push(format!("{}{}{}{}", bg, truncated, pad(&truncated), reset));
+            let wrapped_content = wrap_text(&content);
+            for wc in wrapped_content {
+                lines.push(format!("{}{}{}{}", bg, wc, pad(&wc), reset));
+            }
         }
 
         // footer gap
