@@ -50,6 +50,17 @@ impl TerminalState {
     ) -> tokio::sync::mpsc::Receiver<InputEvent> {
         let (tx, rx) = tokio::sync::mpsc::channel(100);
         
+        let renderer_for_winch = renderer.clone();
+        tokio::spawn(async move {
+            use tokio::signal::unix::{signal, SignalKind};
+            if let Ok(mut sigwinch) = signal(SignalKind::window_change()) {
+                while sigwinch.recv().await.is_some() {
+                    let mut renderer_lock = renderer_for_winch.lock().unwrap();
+                    renderer_lock.render();
+                }
+            }
+        });
+
         std::thread::spawn(move || {
             use std::os::unix::io::AsRawFd;
             let fd = io::stdin().as_raw_fd();
@@ -63,29 +74,32 @@ impl TerminalState {
                 }
 
                 let byte = b[0];
-                let mut renderer_lock = renderer.lock().unwrap();
 
                 match byte {
                     // Ctrl + F - Toggle fuzzy search
                     0x06 => {
+                        let mut renderer_lock = renderer.lock().unwrap();
                         renderer_lock.toggle_fuzzy_mode();
                         renderer_lock.render();
                     }
                     // Enter (\r)
                     b'\r' => {
+                        let mut renderer_lock = renderer.lock().unwrap();
                         if renderer_lock.fuzzy_mode {
                             renderer_lock.fuzzy_submit();
                             renderer_lock.render();
-                            continue;
-                        }
-                        let input = renderer_lock.take_input();
-                        renderer_lock.render();
-                        if tx.blocking_send(InputEvent::Submit(input)).is_err() {
-                            break;
+                        } else {
+                            let input = renderer_lock.take_input();
+                            renderer_lock.render();
+                            drop(renderer_lock);
+                            if tx.blocking_send(InputEvent::Submit(input)).is_err() {
+                                break;
+                            }
                         }
                     }
                     // Ctrl + J (\n) - Move down
                     b'\n' => {
+                        let mut renderer_lock = renderer.lock().unwrap();
                         if renderer_lock.fuzzy_mode {
                             renderer_lock.fuzzy_move_down();
                         } else {
@@ -95,6 +109,7 @@ impl TerminalState {
                     }
                     // Ctrl + K - Move up
                     0x0b => {
+                        let mut renderer_lock = renderer.lock().unwrap();
                         if renderer_lock.fuzzy_mode {
                             renderer_lock.fuzzy_move_up();
                         } else {
@@ -104,21 +119,31 @@ impl TerminalState {
                     }
                     // Ctrl + U - Undo
                     0x15 => {
+                        let mut renderer_lock = renderer.lock().unwrap();
                         renderer_lock.undo();
                         renderer_lock.render();
                     }
                     // Ctrl + R - Redo
                     0x12 => {
+                        let mut renderer_lock = renderer.lock().unwrap();
                         renderer_lock.redo();
                         renderer_lock.render();
                     }
                     // Ctrl + O - Toggle full view
                     0x0f => {
+                        let mut renderer_lock = renderer.lock().unwrap();
                         renderer_lock.toggle_last_tool_result();
+                        renderer_lock.render();
+                    }
+                    // Ctrl + L - Clear screen / Full redraw
+                    0x0c => {
+                        let mut renderer_lock = renderer.lock().unwrap();
+                        renderer_lock.force_redraw();
                         renderer_lock.render();
                     }
                     // Backspace / DEL
                     0x7f | 0x08 => {
+                        let mut renderer_lock = renderer.lock().unwrap();
                         renderer_lock.pop_input_char();
                         renderer_lock.render();
                     }
@@ -129,12 +154,15 @@ impl TerminalState {
                     }
                     // ESC or sequence
                     0x1b => {
-                        match get_escape_type(fd) {
+                        let escape = get_escape_type(fd);
+                        let mut renderer_lock = renderer.lock().unwrap();
+                        match escape {
                             EscapeType::Plain => {
                                 if renderer_lock.fuzzy_mode {
                                     renderer_lock.cancel_fuzzy();
                                     renderer_lock.render();
                                 } else {
+                                    drop(renderer_lock);
                                     if tx.blocking_send(InputEvent::Cancel).is_err() {
                                         break;
                                     }
@@ -173,6 +201,7 @@ impl TerminalState {
                     }
                     // Printable
                     byte if byte >= 0x20 && byte < 0x7f => {
+                        let mut renderer_lock = renderer.lock().unwrap();
                         renderer_lock.push_input_char(byte as char);
                         renderer_lock.render();
                     }

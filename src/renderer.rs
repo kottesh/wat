@@ -214,6 +214,7 @@ pub struct DifferentialRenderer {
     fuzzy_triggered_by_at: bool,
 
     terminal_size: Size,
+    last_terminal_size: Size,
     use_colors: bool,
 }
 
@@ -244,6 +245,7 @@ impl DifferentialRenderer {
             fuzzy_query: String::new(),
             fuzzy_triggered_by_at: false,
             terminal_size,
+            last_terminal_size: terminal_size,
             use_colors,
         }
     }
@@ -299,7 +301,7 @@ impl DifferentialRenderer {
     fn load_fuzzy_files(&mut self) {
         let mut files = Vec::new();
         // Ignore .git, target, node_modules automatically via ignore crate
-        let walker = WalkBuilder::new("./").hidden(true).build();
+        let walker = WalkBuilder::new("./").hidden(false).build();
         for result in walker {
             if let Ok(entry) = result {
                 if entry.file_type().map_or(false, |ft| ft.is_file()) {
@@ -853,16 +855,16 @@ impl DifferentialRenderer {
         lines.push(border); // bottom border
 
         // Cap the output to the terminal height to prevent vertical scrolling desync
-        let max_height = self.terminal_size.height.saturating_sub(1) as usize;
-        if lines.len() > max_height {
-            let skip = lines.len() - max_height;
-            lines.drain(0..skip);
-            if cursor_row >= skip {
-                cursor_row -= skip;
-            } else {
-                cursor_row = 0;
-            }
-        }
+        // let max_height = self.terminal_size.height as usize;
+        // if lines.len() >= max_height {
+        //     let skip = lines.len() - max_height + 1; // leave 1 line for safety
+        //     lines.drain(0..skip);
+        //     if cursor_row >= skip {
+        //         cursor_row -= skip;
+        //     } else {
+        //         cursor_row = 0;
+        //     }
+        // }
 
         (lines, cursor_row, cursor_col)
     }
@@ -870,6 +872,14 @@ impl DifferentialRenderer {
     /// Differential render: compute new lines, diff, write only changes.
     pub fn render(&mut self) {
         self.update_size();
+        
+        // Detect terminal resize and force full redraw
+        if self.terminal_size.width != self.last_terminal_size.width || 
+           self.terminal_size.height != self.last_terminal_size.height {
+            self.force_redraw();
+            self.last_terminal_size = self.terminal_size;
+        }
+
         let (new_lines, target_cursor_row, target_cursor_col) = self.render_all();
         let new_len = new_lines.len();
         let old_len = self.previous_lines.len();
@@ -898,7 +908,7 @@ impl DifferentialRenderer {
         // 1. Move to first changed line
         let diff = first as i64 - self.cursor_row as i64;
         if diff > 0 {
-            buf.push_str(&format!("\x1b[{}B", diff));
+            buf.push_str(&"\n".repeat(diff as usize));
         } else if diff < 0 {
             buf.push_str(&format!("\x1b[{}A", -diff));
         }
@@ -941,7 +951,7 @@ impl DifferentialRenderer {
         }
         let diff = row as i64 - self.cursor_row as i64;
         if diff > 0 {
-            print!("\x1b[{}B", diff);
+            print!("{}", "\n".repeat(diff as usize));
         } else if diff < 0 {
             print!("\x1b[{}A", -diff);
         }
@@ -1011,18 +1021,15 @@ impl DifferentialRenderer {
 pub fn visible_width(s: &str) -> usize {
     let mut width = 0;
     let mut in_esc = false;
-    let mut in_bracket = false;
     for c in s.chars() {
         if c == '\x1b' {
             in_esc = true;
             continue;
         }
         if in_esc {
-            if c == '[' {
-                in_bracket = true;
-            } else if c.is_ascii_alphabetic() || c == 'm' {
+            // ANSI escape sequences usually end with an alphabetic character
+            if c.is_ascii_alphabetic() {
                 in_esc = false;
-                in_bracket = false;
             }
             continue;
         }
