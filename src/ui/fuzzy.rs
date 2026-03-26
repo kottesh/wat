@@ -276,6 +276,45 @@ impl FuzzySearch {
     pub fn total_files(&self) -> usize {
         self.files.len()
     }
+
+    /// Get selected file (alias for get_selected)
+    pub fn selected_file(&self) -> Option<String> {
+        self.get_selected().map(|s| s.to_string())
+    }
+
+    /// Move selection up
+    pub fn move_up(&mut self) {
+        self.move_selection(-1);
+    }
+
+    /// Move selection down
+    pub fn move_down(&mut self) {
+        self.move_selection(1);
+    }
+
+    /// Render fuzzy search results
+    pub fn render(&self, _width: u16) -> Vec<String> {
+        let mut lines = Vec::new();
+        
+        // Header
+        lines.push(format!("Fuzzy Search ({}  results):", self.results.len()));
+        lines.push(String::new());
+        
+        // Results
+        for (i, file) in self.results.iter().enumerate() {
+            if i == self.selection {
+                lines.push(format!("> {}", file));
+            } else {
+                lines.push(format!("  {}", file));
+            }
+        }
+        
+        if self.results.is_empty() {
+            lines.push("  No matches".to_string());
+        }
+        
+        lines
+    }
 }
 
 impl Default for FuzzySearch {

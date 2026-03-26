@@ -41,6 +41,40 @@ impl Editor {
         (self.cursor_row, self.cursor_col)
     }
 
+    /// Get full content as single string
+    pub fn content(&self) -> String {
+        self.lines.join("\n")
+    }
+
+    /// Clear all content
+    pub fn clear(&mut self) {
+        self.lines = vec![String::new()];
+        self.cursor_row = 0;
+        self.cursor_col = 0;
+        self.undo_stack.clear();
+        self.redo_stack.clear();
+    }
+
+    /// Render with optional spinner and hint
+    pub fn render(
+        &self,
+        width: u16,
+        use_colors: bool,
+        spinner: Option<String>,
+        hint: Option<String>,
+    ) -> (Vec<String>, usize, usize) {
+        let (mut lines, (cursor_row, cursor_col)) = self.render_with_border(width, use_colors);
+        
+        // Add spinner or hint if present
+        if let Some(spinner_text) = spinner {
+            lines.push(format!("  {}", spinner_text));
+        } else if let Some(hint_text) = hint {
+            lines.push(format!("  {}", hint_text));
+        }
+        
+        (lines, cursor_row, cursor_col)
+    }
+
     /// Save current state to undo stack
     fn save_undo(&mut self) {
         self.undo_stack.push(EditorSnapshot {
