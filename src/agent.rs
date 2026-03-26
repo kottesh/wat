@@ -10,7 +10,7 @@ use anyhow::Result;
 use crate::{
     config::Config,
     llm::{LlmClient, Message, StreamChunk, ToolCall, ToolResult},
-    renderer::SharedRenderer,
+    ui::SharedRenderer,
     terminal::{InputEvent, TerminalState},
     tools::{ToolRegistry, ToolUpdate},
 };
@@ -34,7 +34,7 @@ impl Agent {
     pub fn new(config: Config) -> Result<Self> {
         let terminal = TerminalState::new()?;
         let renderer = Arc::new(Mutex::new(
-            crate::renderer::DifferentialRenderer::new(true)
+            crate::ui::UIManager::new(true)
         ));
         let llm_client = LlmClient::new(config)?;
         Ok(Self { 

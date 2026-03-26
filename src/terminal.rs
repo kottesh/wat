@@ -46,7 +46,7 @@ impl TerminalState {
 
     pub fn spawn_input_handler(
         &self,
-        renderer: crate::renderer::SharedRenderer,
+        renderer: crate::ui::SharedRenderer,
     ) -> tokio::sync::mpsc::Receiver<InputEvent> {
         let (tx, rx) = tokio::sync::mpsc::channel(100);
         
@@ -85,7 +85,7 @@ impl TerminalState {
                     // Enter (\r)
                     b'\r' => {
                         let mut renderer_lock = renderer.lock().unwrap();
-                        if renderer_lock.fuzzy_mode {
+                        if renderer_lock.fuzzy_mode() {
                             renderer_lock.fuzzy_submit();
                             renderer_lock.render();
                         } else {
@@ -100,7 +100,7 @@ impl TerminalState {
                     // Ctrl + J (\n) - Move down
                     b'\n' => {
                         let mut renderer_lock = renderer.lock().unwrap();
-                        if renderer_lock.fuzzy_mode {
+                        if renderer_lock.fuzzy_mode() {
                             renderer_lock.fuzzy_move_down();
                         } else {
                             renderer_lock.move_cursor_down();
@@ -110,7 +110,7 @@ impl TerminalState {
                     // Ctrl + K - Move up
                     0x0b => {
                         let mut renderer_lock = renderer.lock().unwrap();
-                        if renderer_lock.fuzzy_mode {
+                        if renderer_lock.fuzzy_mode() {
                             renderer_lock.fuzzy_move_up();
                         } else {
                             renderer_lock.move_cursor_up();
@@ -158,7 +158,7 @@ impl TerminalState {
                         let mut renderer_lock = renderer.lock().unwrap();
                         match escape {
                             EscapeType::Plain => {
-                                if renderer_lock.fuzzy_mode {
+                                if renderer_lock.fuzzy_mode() {
                                     renderer_lock.cancel_fuzzy();
                                     renderer_lock.render();
                                 } else {
@@ -173,7 +173,7 @@ impl TerminalState {
                                 renderer_lock.render();
                             }
                             EscapeType::ArrowUp => {
-                                if renderer_lock.fuzzy_mode {
+                                if renderer_lock.fuzzy_mode() {
                                     renderer_lock.fuzzy_move_up();
                                 } else {
                                     renderer_lock.move_cursor_up();
@@ -181,7 +181,7 @@ impl TerminalState {
                                 renderer_lock.render();
                             }
                             EscapeType::ArrowDown => {
-                                if renderer_lock.fuzzy_mode {
+                                if renderer_lock.fuzzy_mode() {
                                     renderer_lock.fuzzy_move_down();
                                 } else {
                                     renderer_lock.move_cursor_down();

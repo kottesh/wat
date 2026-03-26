@@ -2,11 +2,11 @@
 
 use crate::component::{Component, ComponentId};
 use crate::components::{
-    BashComponent, BashStatus, ErrorComponent, ResponseComponent, ToolCallComponent,
+    BashComponent, ErrorComponent, ResponseComponent, ToolCallComponent,
     ToolResultComponent, UserInputComponent,
 };
 use crate::ui::{CursorPos, DiffRenderer, Editor, FuzzySearch, Layout, Spacing};
-use std::io::{self, Write};
+use std::sync::{Arc, Mutex};
 
 /// Terminal size
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -213,14 +213,21 @@ impl UIManager {
         self.history.push(HistoryItem::Component(Box::new(comp)));
     }
 
-    pub fn add_tool_result(&mut self, tool_name: String, content: String, success: bool) {
+    pub fn add_tool_result(
+        &mut self,
+        tool_name: String,
+        content: String,
+        duration_secs: Option<f64>,
+        success: bool,
+        command: Option<String>,
+    ) {
         let comp = ToolResultComponent::new(
             next_component_id(),
-            tool_name.clone(),
+            tool_name,
             content,
-            None, // duration_secs
+            duration_secs,
             success,
-            None, // command
+            command,
             self.use_colors
         );
         self.history.push(HistoryItem::Component(Box::new(comp)));
@@ -437,6 +444,9 @@ fn buffer_to_lines(buffer: &crate::component::Buffer) -> Vec<String> {
     }
     result
 }
+
+/// Shared renderer type (thread-safe)
+pub type SharedRenderer = Arc<Mutex<UIManager>>;
 
 /// Global component ID counter
 static COMPONENT_ID_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
