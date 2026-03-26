@@ -95,6 +95,7 @@ impl Modifiers {
         Self { bold: true, ..Default::default() }
     }
 
+    #[allow(dead_code)] // Public API for dimmed text styling
     pub fn dim() -> Self {
         Self { dim: true, ..Default::default() }
     }

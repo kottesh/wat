@@ -50,8 +50,10 @@ impl ApiType {
 /// Runtime configuration used by the application
 #[derive(Debug, Clone)]
 pub struct Config {
+    #[allow(dead_code)] // Stored for future /model command
     pub provider_name: String,
     pub model_id: String,
+    #[allow(dead_code)] // Stored for future UI display
     pub model_name: String,
     pub base_url: String,
     pub api_type: ApiType,
@@ -181,11 +183,13 @@ impl ModelsConfig {
     }
     
     /// List all provider names
+    #[allow(dead_code)] // Public API for /model command
     pub fn list_providers(&self) -> Vec<String> {
         self.providers.keys().cloned().collect()
     }
     
     /// List models for a specific provider
+    #[allow(dead_code)] // Public API for /model command
     pub fn list_models(&self, provider: &str) -> Option<&Vec<Model>> {
         self.providers.get(provider).map(|p| &p.models)
     }

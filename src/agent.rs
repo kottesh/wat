@@ -9,7 +9,7 @@ use anyhow::Result;
 
 use crate::{
     config::Config,
-    llm::{LlmClient, Message, MessageContent, StreamChunk, FinishReason, ToolCall, ToolResult},
+    llm::{LlmClient, Message, StreamChunk, ToolCall, ToolResult},
     renderer::SharedRenderer,
     terminal::{InputEvent, TerminalState},
     tools::{ToolRegistry, ToolUpdate},

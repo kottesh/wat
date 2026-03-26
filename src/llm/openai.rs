@@ -5,11 +5,10 @@ use async_trait::async_trait;
 use futures_util::stream::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::HashMap;
 use std::pin::Pin;
 
 use super::provider::{LlmProvider, ProviderCapabilities, StreamOptions};
-use super::types::{FinishReason, Message, MessageContent, MessageRole, StreamChunk, ToolCall};
+use super::types::{FinishReason, Message, MessageContent, MessageRole, StreamChunk};
 use crate::tools::ToolDefinition;
 
 /// OpenAI provider
@@ -100,6 +99,7 @@ struct StreamToolCall {
     #[serde(default)]
     id: Option<String>,
     #[serde(rename = "type", default)]
+    #[allow(dead_code)] // Part of API response schema
     call_type: Option<String>,
     #[serde(default)]
     function: Option<StreamFunction>,
@@ -121,6 +121,7 @@ impl OpenAiProvider {
             .context("Failed to create HTTP client")?;
 
         let capabilities = ProviderCapabilities {
+            native_tools: true,
             parallel_tool_calls: true,
             tool_streaming: true,
             vision: false,
@@ -209,10 +210,6 @@ impl OpenAiProvider {
             .collect()
     }
 
-    /// Parse a single SSE line (instance method)
-    fn parse_sse_line(&self, line: &str) -> Option<Vec<StreamChunk>> {
-        parse_sse_line_static(line)
-    }
 }
 
 /// Parse a single SSE line (static function for use in streams)
@@ -436,7 +433,7 @@ mod tests {
 
     #[test]
     fn test_parse_text_delta() {
-        let provider = OpenAiProvider::new(
+        let _provider = OpenAiProvider::new(
             "https://api.openai.com/v1".to_string(),
             "test-key".to_string(),
             "gpt-4".to_string(),
@@ -444,7 +441,7 @@ mod tests {
         .unwrap();
 
         let line = r#"data: {"choices":[{"delta":{"content":"Hello"}}]}"#;
-        let chunks = provider.parse_sse_line(line).unwrap();
+        let chunks = parse_sse_line_static(line).unwrap();
 
         assert_eq!(chunks.len(), 1);
         match &chunks[0] {
@@ -455,7 +452,7 @@ mod tests {
 
     #[test]
     fn test_parse_tool_call_start() {
-        let provider = OpenAiProvider::new(
+        let _provider = OpenAiProvider::new(
             "https://api.openai.com/v1".to_string(),
             "test-key".to_string(),
             "gpt-4".to_string(),
@@ -463,7 +460,7 @@ mod tests {
         .unwrap();
 
         let line = r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_abc","type":"function","function":{"name":"bash"}}]}}]}"#;
-        let chunks = provider.parse_sse_line(line).unwrap();
+        let chunks = parse_sse_line_static(line).unwrap();
 
         assert!(!chunks.is_empty());
         match &chunks[0] {
@@ -478,7 +475,7 @@ mod tests {
 
     #[test]
     fn test_parse_tool_args_delta() {
-        let provider = OpenAiProvider::new(
+        let _provider = OpenAiProvider::new(
             "https://api.openai.com/v1".to_string(),
             "test-key".to_string(),
             "gpt-4".to_string(),
@@ -486,7 +483,7 @@ mod tests {
         .unwrap();
 
         let line = r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\""}}]}}]}"#;
-        let chunks = provider.parse_sse_line(line).unwrap();
+        let chunks = parse_sse_line_static(line).unwrap();
 
         assert!(!chunks.is_empty());
         match &chunks[0] {
@@ -500,7 +497,7 @@ mod tests {
 
     #[test]
     fn test_parse_finish_reason() {
-        let provider = OpenAiProvider::new(
+        let _provider = OpenAiProvider::new(
             "https://api.openai.com/v1".to_string(),
             "test-key".to_string(),
             "gpt-4".to_string(),
@@ -508,7 +505,7 @@ mod tests {
         .unwrap();
 
         let line = r#"data: {"choices":[{"delta":{},"finish_reason":"stop"}]}"#;
-        let chunks = provider.parse_sse_line(line).unwrap();
+        let chunks = parse_sse_line_static(line).unwrap();
 
         assert_eq!(chunks.len(), 1);
         match &chunks[0] {
@@ -521,7 +518,7 @@ mod tests {
 
     #[test]
     fn test_parse_done_marker() {
-        let provider = OpenAiProvider::new(
+        let _provider = OpenAiProvider::new(
             "https://api.openai.com/v1".to_string(),
             "test-key".to_string(),
             "gpt-4".to_string(),
@@ -529,7 +526,7 @@ mod tests {
         .unwrap();
 
         let line = "data: [DONE]";
-        let chunks = provider.parse_sse_line(line);
+        let chunks = parse_sse_line_static(line);
         assert!(chunks.is_none());
     }
 }

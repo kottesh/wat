@@ -6,12 +6,16 @@ pub mod openai;
 pub mod anthropic;
 pub mod client;
 
+// Public API - only what users need
 pub use types::{
-    Message, MessageRole, MessageContent,
+    Message, MessageContent,
     ToolCall, ToolResult,
     StreamChunk, FinishReason,
 };
-pub use provider::{LlmProvider, ProviderCapabilities, StreamOptions, TokenUsage};
-pub use openai::OpenAiProvider;
-pub use anthropic::AnthropicProvider;
-pub use client::{LlmClient, ProviderType};
+pub use client::LlmClient;
+
+// Internal types - not exported
+// - MessageRole: internal to message construction
+// - LlmProvider, ProviderCapabilities, StreamOptions, TokenUsage: internal traits
+// - OpenAiProvider, AnthropicProvider: internal implementations
+// - ProviderType: internal to client

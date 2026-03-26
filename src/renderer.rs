@@ -105,7 +105,7 @@ impl BashBlock {
         let mut lines = Vec::new();
         let empty = " ".repeat(width);
 
-        let mut wrap_text = |text: &str| -> Vec<String> {
+        let wrap_text = |text: &str| -> Vec<String> {
             let mut result = Vec::new();
             let mut current_line = String::new();
             let mut current_width = 0;
@@ -533,6 +533,7 @@ impl DifferentialRenderer {
         self.items.push(RenderItem::Component(Box::new(comp)));
     }
 
+    #[allow(dead_code)] // Public API for adding completed responses
     pub fn add_response(&mut self, content: String) {
         self.update_size();
         let id = next_component_id();
@@ -1021,6 +1022,7 @@ impl DifferentialRenderer {
     }
 
     /// Return the stdout/stderr output lines of the most recently finalised bash block.
+    #[allow(dead_code)] // Public API for accessing bash output
     pub fn last_bash_output(&self) -> String {
         for item in self.items.iter().rev() {
             if let RenderItem::Bash(b) = item {

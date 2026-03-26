@@ -6,8 +6,12 @@ pub mod bash;
 pub mod read_file;
 pub mod registry;
 
-pub use definition::{ToolDefinition, ParameterSchema, PropertySchema};
-pub use executor::{ToolExecutor, ExecutionResult, ToolUpdate};
-pub use bash::BashTool;
-pub use read_file::ReadFileTool;
+// Public API - only what users need
+pub use definition::{ToolDefinition, ParameterSchema};
+pub use executor::{ExecutionResult, ToolUpdate};
 pub use registry::ToolRegistry;
+
+// Internal types - not exported
+// - PropertySchema: internal to schema building
+// - ToolExecutor: internal trait
+// - BashTool, ReadFileTool: internal implementations, accessed via registry

@@ -11,13 +11,20 @@ use crate::tools::ToolDefinition;
 /// Provider capabilities
 #[derive(Debug, Clone)]
 pub struct ProviderCapabilities {
+    /// Whether native tool calling is supported (always true for our providers)
+    #[allow(dead_code)] // Part of capabilities API
+    pub native_tools: bool,
     /// Can make multiple tool calls in parallel
+    #[allow(dead_code)] // Future use
     pub parallel_tool_calls: bool,
     /// Streams tool call arguments incrementally
+    #[allow(dead_code)] // Future use
     pub tool_streaming: bool,
     /// Supports vision/image inputs
+    #[allow(dead_code)] // Future use for vision support
     pub vision: bool,
     /// Maximum tools that can be called in one response
+    #[allow(dead_code)] // Future use
     pub max_tools_per_call: usize,
 }
 
@@ -39,6 +46,7 @@ impl Default for StreamOptions {
 
 /// Token usage information
 #[derive(Debug, Clone, Default)]
+#[allow(dead_code)] // Future use for usage tracking
 pub struct TokenUsage {
     pub prompt_tokens: u32,
     pub completion_tokens: u32,
@@ -48,9 +56,11 @@ pub struct TokenUsage {
 #[async_trait]
 pub trait LlmProvider: Send + Sync {
     /// Provider name for identification
+    #[allow(dead_code)] // Public API for provider identification
     fn name(&self) -> &str;
 
     /// Provider capabilities
+    #[allow(dead_code)] // Public API for capability detection
     fn capabilities(&self) -> &ProviderCapabilities;
 
     /// Stream a response with optional tool definitions
@@ -76,12 +86,14 @@ mod tests {
     #[test]
     fn test_provider_capabilities() {
         let caps = ProviderCapabilities {
+            native_tools: true,
             parallel_tool_calls: true,
             tool_streaming: true,
             vision: false,
             max_tools_per_call: 16,
         };
 
+        assert!(caps.native_tools);
         assert!(caps.parallel_tool_calls);
         assert!(caps.tool_streaming);
         assert!(!caps.vision);

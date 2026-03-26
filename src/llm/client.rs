@@ -1,6 +1,6 @@
 //! Unified LLM client that wraps provider implementations
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use futures_util::Stream;
 use std::pin::Pin;
 
@@ -51,12 +51,14 @@ impl LlmClient {
         })
     }
 
-    /// Get provider type
+    /// Get provider type (for model switching)
+    #[allow(dead_code)] // Public API for future model switching feature
     pub fn provider_type(&self) -> ProviderType {
         self.provider_type
     }
 
     /// Get provider capabilities
+    #[allow(dead_code)] // Public API for capability detection
     pub fn capabilities(&self) -> &ProviderCapabilities {
         self.provider.capabilities()
     }

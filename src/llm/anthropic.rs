@@ -70,6 +70,7 @@ struct AnthropicTool {
 #[serde(tag = "type")]
 enum AnthropicEvent {
     #[serde(rename = "message_start")]
+    #[allow(dead_code)] // Part of API response schema
     MessageStart { message: MessageInfo },
     #[serde(rename = "content_block_start")]
     ContentBlockStart { index: usize, content_block: ContentBlock },
@@ -86,6 +87,7 @@ enum AnthropicEvent {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)] // Deserialization only
 struct MessageInfo {
     id: String,
     role: String,
@@ -95,6 +97,7 @@ struct MessageInfo {
 #[serde(tag = "type")]
 enum ContentBlock {
     #[serde(rename = "text")]
+    #[allow(dead_code)] // Part of API response schema
     Text { text: String },
     #[serde(rename = "tool_use")]
     ToolUse { id: String, name: String },
@@ -122,6 +125,7 @@ impl AnthropicProvider {
             .context("Failed to create HTTP client")?;
 
         let capabilities = ProviderCapabilities {
+            native_tools: true,
             parallel_tool_calls: true,
             tool_streaming: false, // Anthropic sends complete tool blocks, not incremental args
             vision: true,

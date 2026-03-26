@@ -57,6 +57,7 @@ impl ToolRegistry {
     }
 
     /// List all tool names
+    #[allow(dead_code)] // Public API for debugging/listing
     pub fn list_names(&self) -> Vec<String> {
         self.tools.keys().cloned().collect()
     }

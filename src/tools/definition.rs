@@ -18,6 +18,7 @@ pub struct ToolDefinition {
 
 impl ToolDefinition {
     /// Create a clone suitable for passing to provider
+    #[allow(dead_code)] // Future use for history conversion
     pub fn clone_for_provider(&self) -> Self {
         Self {
             name: self.name.clone(),
@@ -77,6 +78,7 @@ impl ParameterSchema {
     }
 
     /// Add a number property
+    #[allow(dead_code)] // Future use for numeric parameters
     pub fn add_number(mut self, name: &str, description: &str, required: bool) -> Self {
         self.properties.insert(
             name.to_string(),
@@ -94,6 +96,7 @@ impl ParameterSchema {
     }
 
     /// Add a boolean property
+    #[allow(dead_code)] // Future use for boolean parameters
     pub fn add_boolean(mut self, name: &str, description: &str, required: bool) -> Self {
         self.properties.insert(
             name.to_string(),

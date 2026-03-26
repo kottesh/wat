@@ -74,6 +74,7 @@ pub enum StreamChunk {
     
     /// Incremental tool call arguments (JSON delta)
     ToolCallArgsDelta {
+        #[allow(dead_code)] // Kept for completeness, indexed by index field
         id: String,
         index: usize,
         args_json_delta: String,
@@ -81,12 +82,15 @@ pub enum StreamChunk {
     
     /// Tool call completed
     ToolCallComplete {
+        #[allow(dead_code)] // Kept for API consistency
         id: String,
+        #[allow(dead_code)] // Kept for API consistency
         index: usize,
     },
     
     /// Response finished
     Done {
+        #[allow(dead_code)] // Kept for future logging/debugging
         finish_reason: FinishReason,
     },
 }
