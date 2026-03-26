@@ -1,5 +1,5 @@
 mod terminal;
-mod renderer;
+mod ui;
 mod component;
 mod components;
 mod agent;
