@@ -5,7 +5,7 @@
 
 pub mod component;
 pub mod components;
-pub mod renderer;
+// Old renderer removed - replaced by ui module
 pub mod terminal;
 pub mod agent;
 pub mod config;
@@ -17,4 +17,5 @@ pub mod ui;
 pub use agent::Agent;
 pub use config::{Config, ModelsConfig};
 pub use llm::Message;
-pub use renderer::DifferentialRenderer;
+// Backward compatibility export
+pub use ui::UIManager as DifferentialRenderer;
