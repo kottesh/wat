@@ -7,10 +7,13 @@ An inline terminal assistant with an agentic loop. Type your request, and it exe
 ## Features
 
 - **Inline UI** - Appears at your command line with a clean input box
+- **Native tool calling** - Uses OpenAI function calling and Anthropic tool use APIs
 - **Agentic loop** - Automatically executes bash commands and continues until done
-- **Bash tool** - Runs shell commands in ```bash blocks
-- **Safe execution** - Refuses dangerous commands (rm -rf /, etc.)
-- **Multi-LLM support** - OpenAI, Anthropic, ZhipuAI, or any OpenAI-compatible API
+- **Streaming responses** - Real-time text and tool call streaming
+- **Multiple tools** - Bash execution, file reading, and more
+- **Multi-LLM support** - OpenAI, Anthropic, or any OpenAI-compatible API
+- **Multiple providers** - Configure multiple LLM providers and switch between them
+- **120s bash timeout** - Automatic timeout with cancellation support
 
 ## Installation
 
@@ -24,56 +27,156 @@ Binary will be at `target/release/wat`
 
 ## Configuration
 
-Create `~/.config/wat/config.toml`:
+Create `~/.config/wat/models.json`:
 
-```toml
-[llm]
-provider = "Custom"
-model = "glm-4-flash"
-api_key = "${ZHIPUAI_API_KEY}"
-base_url = "https://open.bigmodel.cn/api/paas/v4/chat/completions"
-temperature = 0.3
-max_tokens = 2000
-
-[ui]
-use_colors = true
+```json
+{
+  "activeProvider": "right-codex",
+  "activeModel": "gpt-5.3-codex",
+  "providers": {
+    "openai": {
+      "baseUrl": "https://api.openai.com/v1",
+      "api": "openai-completions",
+      "apiKey": "${OPENAI_API_KEY}",
+      "models": [
+        { "id": "gpt-4", "name": "GPT-4" },
+        { "id": "gpt-4-turbo", "name": "GPT-4 Turbo" },
+        { "id": "gpt-3.5-turbo", "name": "GPT-3.5 Turbo" }
+      ]
+    },
+    "anthropic": {
+      "baseUrl": "https://api.anthropic.com/v1",
+      "api": "anthropic-messages",
+      "apiKey": "${ANTHROPIC_API_KEY}",
+      "models": [
+        { "id": "claude-3-opus-20240229", "name": "Claude 3 Opus" },
+        { "id": "claude-3-sonnet-20240229", "name": "Claude 3 Sonnet" }
+      ]
+    }
+  }
+}
 ```
 
-### Providers
+### Configuration Fields
+
+- **`activeProvider`** - The provider to use (must match a key in `providers`)
+- **`activeModel`** - The model ID to use (must exist in the active provider's models)
+- **`providers`** - Map of provider configurations
+
+### Provider Fields
+
+- **`baseUrl`** - Base URL for the API (without `/chat/completions` or `/messages`)
+- **`api`** - API format to use:
+  - `openai-completions` - OpenAI chat completions format (works with OpenAI, local models via Ollama, LM Studio, etc.)
+  - `anthropic-messages` - Anthropic messages format
+- **`apiKey`** - API key (supports environment variable expansion like `${OPENAI_API_KEY}`)
+- **`models`** - Array of available models with `id` and `name`
+
+### Environment Variables
+
+API keys support environment variable expansion:
+
+```json
+"apiKey": "${OPENAI_API_KEY}"
+```
+
+This will expand to the value of the `OPENAI_API_KEY` environment variable.
+
+### Example Configurations
 
 **OpenAI:**
-```toml
-[llm]
-provider = "OpenAI"
-model = "gpt-4"
-api_key = "${OPENAI_API_KEY}"
+```json
+{
+  "activeProvider": "openai",
+  "activeModel": "gpt-4",
+  "providers": {
+    "openai": {
+      "baseUrl": "https://api.openai.com/v1",
+      "api": "openai-completions",
+      "apiKey": "${OPENAI_API_KEY}",
+      "models": [
+        { "id": "gpt-4", "name": "GPT-4" }
+      ]
+    }
+  }
+}
 ```
 
 **Anthropic:**
-```toml
-[llm]
-provider = "Anthropic"
-model = "claude-3-sonnet-20240229"
-api_key = "${ANTHROPIC_API_KEY}"
+```json
+{
+  "activeProvider": "anthropic",
+  "activeModel": "claude-3-opus-20240229",
+  "providers": {
+    "anthropic": {
+      "baseUrl": "https://api.anthropic.com/v1",
+      "api": "anthropic-messages",
+      "apiKey": "${ANTHROPIC_API_KEY}",
+      "models": [
+        { "id": "claude-3-opus-20240229", "name": "Claude 3 Opus" }
+      ]
+    }
+  }
+}
 ```
 
-**Custom (OpenAI-compatible):**
-```toml
-[llm]
-provider = "Custom"
-model = "your-model"
-api_key = "${YOUR_API_KEY}"
-base_url = "https://your-api.com/v1/chat/completions"
+**Local (Ollama):**
+```json
+{
+  "activeProvider": "local",
+  "activeModel": "llama3",
+  "providers": {
+    "local": {
+      "baseUrl": "http://localhost:11434/v1",
+      "api": "openai-completions",
+      "apiKey": "not-needed",
+      "models": [
+        { "id": "llama3", "name": "Llama 3" },
+        { "id": "codellama", "name": "Code Llama" }
+      ]
+    }
+  }
+}
+```
+
+**Custom OpenAI-compatible:**
+```json
+{
+  "activeProvider": "custom",
+  "activeModel": "your-model",
+  "providers": {
+    "custom": {
+      "baseUrl": "https://your-api.com/v1",
+      "api": "openai-completions",
+      "apiKey": "${YOUR_API_KEY}",
+      "models": [
+        { "id": "your-model", "name": "Your Model" }
+      ]
+    }
+  }
+}
+```
+
+### Switching Models
+
+To switch providers or models, edit `models.json` and change the `activeProvider` and/or `activeModel` fields:
+
+```json
+{
+  "activeProvider": "anthropic",
+  "activeModel": "claude-3-sonnet-20240229",
+  ...
+}
 ```
 
 ## Usage
 
 ```bash
-# Set your API key
-export ZHIPUAI_API_KEY="your-key"
+# Set your API key (if using environment variables)
+export OPENAI_API_KEY="your-key"
 
 # Run the agent
-wat run
+wat
 ```
 
 ### Commands

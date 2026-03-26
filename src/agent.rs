@@ -1,17 +1,18 @@
-//! Main agent — conversation loop with decoupled background rendering.
+//! Main agent — conversation loop with native tool calling
 
 use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}};
 use std::time::Duration;
 use futures_util::StreamExt;
+use serde_json::Value;
 
 use anyhow::Result;
 
 use crate::{
     config::Config,
-    llm::{LlmClient, Message},
+    llm::{LlmClient, Message, MessageContent, StreamChunk, FinishReason, ToolCall, ToolResult},
     renderer::SharedRenderer,
     terminal::{InputEvent, TerminalState},
-    tools::{self, ToolRegistry, ToolUpdate},
+    tools::{ToolRegistry, ToolUpdate},
 };
 
 pub struct Agent {
@@ -22,11 +23,18 @@ pub struct Agent {
     registry: ToolRegistry,
 }
 
+/// In-progress tool call accumulator
+struct InProgressToolCall {
+    id: String,
+    name: String,
+    args_json: String,
+}
+
 impl Agent {
     pub fn new(config: Config) -> Result<Self> {
         let terminal = TerminalState::new()?;
         let renderer = Arc::new(Mutex::new(
-            crate::renderer::DifferentialRenderer::new(true) // Always use colors
+            crate::renderer::DifferentialRenderer::new(true)
         ));
         let llm_client = LlmClient::new(config)?;
         Ok(Self { 
@@ -90,55 +98,83 @@ impl Agent {
     ) -> Result<()> {
         self.history.push(Message::user(query));
 
-        for _ in 0..10 {
+        const MAX_ITERATIONS: usize = 10;
+        const MAX_TOOLS_PER_ITERATION: usize = 4;
+
+        for _ in 0..MAX_ITERATIONS {
             let system = self.system_prompt();
             let mut messages = vec![Message::system(&system)];
             messages.extend(self.history.clone());
 
-            // ── Start background spinner ─────────────────────────────────────
+            // Get tool definitions
+            let tools: Vec<_> = self.registry.get_all_definitions()
+                .into_iter()
+                .map(|t| t.clone())
+                .collect();
+
+            // Start background spinner
             let spinner_active = Arc::new(AtomicBool::new(true));
             let spinner_label = Arc::new(Mutex::new("Thinking...".to_string()));
             let spinner_handle = self.spawn_spinner_task(spinner_active.clone(), spinner_label.clone());
 
-            // ── LLM query with streaming ─────────────────────────────────────
-            let mut stream = self.llm_client.query_stream(messages).await?;
-            let mut full_content = String::new();
-            
+            // Stream LLM response
+            let mut stream = self.llm_client.stream_default(messages, Some(&tools)).await?;
+
             {
                 let mut r = self.renderer.lock().unwrap();
                 r.start_streaming_response();
             }
 
+            // Accumulate response
+            let mut text_content = String::new();
+            let mut tool_calls_map: std::collections::HashMap<usize, InProgressToolCall> = std::collections::HashMap::new();
             let mut first_chunk = true;
+
             let aborted = loop {
                 tokio::select! {
                     chunk = stream.next() => {
                         match chunk {
-                            Some(Ok(text)) => {
+                            Some(Ok(StreamChunk::TextDelta(text))) => {
                                 if first_chunk {
                                     *spinner_label.lock().unwrap() = "Responding...".to_string();
                                     first_chunk = false;
                                 }
-                                full_content.push_str(&text);
+                                text_content.push_str(&text);
                                 let mut r = self.renderer.lock().unwrap();
                                 r.push_response_chunk(&text);
                                 r.render();
                             }
-                            None => break false, 
+                            Some(Ok(StreamChunk::ToolCallStart { id, name, index })) => {
+                                tool_calls_map.insert(index, InProgressToolCall {
+                                    id,
+                                    name,
+                                    args_json: String::new(),
+                                });
+                            }
+                            Some(Ok(StreamChunk::ToolCallArgsDelta { index, args_json_delta, .. })) => {
+                                if let Some(tc) = tool_calls_map.get_mut(&index) {
+                                    tc.args_json.push_str(&args_json_delta);
+                                }
+                            }
+                            Some(Ok(StreamChunk::ToolCallComplete { .. })) => {
+                                // Tool call complete - will process after stream ends
+                            }
+                            Some(Ok(StreamChunk::Done { .. })) => break false,
                             Some(Err(e)) => {
                                 spinner_active.store(false, Ordering::Relaxed);
                                 let _ = spinner_handle.await;
                                 return Err(e);
                             }
+                            None => break false,
                         }
                     }
                     Some(event) = input_rx.recv() => {
                         match event {
+                            InputEvent::Cancel => break true,
                             InputEvent::Shutdown => {
                                 spinner_active.store(false, Ordering::Relaxed);
                                 return Err(anyhow::anyhow!("Interrupted"));
                             }
-                            InputEvent::Cancel => break true,
                             _ => {}
                         }
                     }
@@ -155,115 +191,174 @@ impl Agent {
                 r.render();
             }
 
-            if aborted { return Ok(()); }
+            if aborted {
+                return Ok(());
+            }
 
-            let tools = tools::parse_tools(&full_content, &self.registry);
-            if tools.is_empty() {
-                self.history.push(Message::assistant(&full_content));
+            // Convert accumulated tool calls
+            let mut tool_calls: Vec<ToolCall> = tool_calls_map
+                .into_iter()
+                .filter_map(|(_, tc)| {
+                    serde_json::from_str::<Value>(&tc.args_json)
+                        .ok()
+                        .map(|args| ToolCall {
+                            id: tc.id,
+                            name: tc.name,
+                            arguments: args,
+                        })
+                })
+                .collect();
+
+            // Limit to 4 tools per iteration
+            tool_calls.truncate(MAX_TOOLS_PER_ITERATION);
+
+            // No tools to call - we're done
+            if tool_calls.is_empty() {
+                self.history.push(Message::assistant(&text_content));
                 break;
             }
 
-            self.history.push(Message::assistant(&full_content));
-            let mut all_results = String::new();
+            // Add assistant message with tool calls
+            self.history.push(Message::assistant_with_tools(
+                if text_content.is_empty() { None } else { Some(text_content) },
+                tool_calls.clone(),
+            ));
 
-            for tool_call in &tools {
-                if let Some(tool) = self.registry.get(&tool_call.name) {
-                    // Start generic tool timer/spinner
-                    let active = Arc::new(AtomicBool::new(true));
-                    let start = std::time::Instant::now();
-                    let spinner = self.spawn_bash_timer_task(active.clone(), start);
-
-                    {
-                        let mut r = self.renderer.lock().unwrap();
-                        if tool_call.name == "bash" {
-                            r.start_bash(tool_call.args["command"].as_str().unwrap_or(""));
-                        } else {
-                            r.add_tool_call(tool_call.name.clone(), tool.display_call(&tool_call.args));
-                        }
-                        r.render();
-                    }
-
-                    let renderer = self.renderer.clone();
-                    let tool_name = tool_call.name.clone();
-                    
-                    let on_update = Box::new(move |update| {
-                        let mut r = renderer.lock().unwrap();
-                        match update {
-                            ToolUpdate::Stdout(line) | ToolUpdate::Stderr(line) => {
-                                if tool_name == "bash" {
-                                    r.push_bash_output(line);
-                                }
-                            }
-                            ToolUpdate::Status(_status) => {}
-                        }
-                        r.render();
-                    });
-
-                    let mut tool_cancelled = false;
-                    let mut tool_result = None;
-                    
-                    let mut result_future = Box::pin(tool.execute(tool_call.args.clone(), on_update));
-                    
-                    loop {
-                        tokio::select! {
-                            res = &mut result_future => {
-                                tool_result = Some(res?);
-                                break;
-                            }
-                            Some(event) = input_rx.recv() => {
-                                match event {
-                                    InputEvent::Cancel => {
-                                        tool_cancelled = true;
-                                        tool_result = Some(tools::ToolResult {
-                                            content: "Cancelled by user".to_string(),
-                                            details: serde_json::json!({ "cancelled": true }),
-                                            success: false,
-                                            duration_secs: start.elapsed().as_secs_f64(),
-                                        });
-                                        break;
-                                    }
-                                    InputEvent::Shutdown => {
-                                        active.store(false, Ordering::Relaxed);
-                                        return Err(anyhow::anyhow!("Interrupted"));
-                                    }
-                                    _ => {} // Ignore other events
-                                }
-                            }
-                        }
-                    }
-                    
-                    let result = tool_result.unwrap();
-
-                    active.store(false, Ordering::Relaxed);
-                    let _ = spinner.await;
-
-                    {
-                        let mut r = self.renderer.lock().unwrap();
-                        r.clear_input_hint();
-                        if tool_call.name == "bash" {
-                            r.finalize_bash(result.duration_secs, result.success, tool_cancelled);
-                        } else {
-                            r.add_tool_result(
-                                tool_call.name.clone(),
-                                result.content.clone(),
-                                Some(result.duration_secs),
-                                result.success,
-                                None,
-                            );
-                        }
-                        r.render();
-                    }
-
-                    all_results.push_str(&format!("Tool: {}\n{}\n", tool_call.name, result.content));
-                }
-            }
-
-            if !all_results.is_empty() {
-                self.history.push(Message::user(&format!("Tool output:\n{}", all_results)));
+            // Execute tools
+            for call in tool_calls {
+                let result = self.execute_tool(&call, input_rx).await?;
+                self.history.push(Message::tool_result(result));
             }
         }
 
         Ok(())
+    }
+
+    async fn execute_tool(
+        &mut self,
+        call: &ToolCall,
+        input_rx: &mut tokio::sync::mpsc::Receiver<InputEvent>,
+    ) -> Result<ToolResult> {
+        let tool_def = self.registry
+            .get(&call.name)
+            .ok_or_else(|| anyhow::anyhow!("Unknown tool: {}", call.name))?;
+
+        // Setup UI
+        {
+            let mut r = self.renderer.lock().unwrap();
+            if call.name == "bash" {
+                r.start_bash(call.arguments["command"].as_str().unwrap_or(""));
+            } else {
+                r.add_tool_call(call.name.clone(), format!("{}", call.arguments));
+            }
+            r.render();
+        }
+
+        // Setup progress callback
+        let renderer = self.renderer.clone();
+        let tool_name = call.name.clone();
+        let on_update = Box::new(move |update: ToolUpdate| {
+            let mut r = renderer.lock().unwrap();
+            match update {
+                ToolUpdate::Stdout(line) if tool_name == "bash" => {
+                    r.push_bash_output(line);
+                    r.render();
+                }
+                ToolUpdate::Stderr(line) if tool_name == "bash" => {
+                    r.push_bash_output(line);
+                    r.render();
+                }
+                _ => {}
+            }
+        });
+
+        // Execute with timeout
+        let timeout_duration = tool_def.executor.timeout().unwrap_or(Duration::from_secs(30));
+        
+        let active = Arc::new(AtomicBool::new(true));
+        let start = std::time::Instant::now();
+        let timer_handle = self.spawn_bash_timer_task(active.clone(), start);
+
+        let mut exec_future = Box::pin(tool_def.executor.execute(call.arguments.clone(), on_update));
+        let mut cancelled = false;
+
+        let exec_result = loop {
+            tokio::select! {
+                result = &mut exec_future => {
+                    break Some(result);
+                }
+                _ = tokio::time::sleep(timeout_duration) => {
+                    // Timeout
+                    break None;
+                }
+                Some(event) = input_rx.recv() => {
+                    match event {
+                        InputEvent::Cancel => {
+                            cancelled = true;
+                            break None;
+                        }
+                        InputEvent::Shutdown => {
+                            active.store(false, Ordering::Relaxed);
+                            return Err(anyhow::anyhow!("Interrupted"));
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        };
+
+        active.store(false, Ordering::Relaxed);
+        let _ = timer_handle.await;
+
+        let execution_result = match exec_result {
+            Some(Ok(result)) => result,
+            Some(Err(e)) => {
+                crate::tools::ExecutionResult {
+                    content: format!("Tool execution failed: {}", e),
+                    success: false,
+                    error: Some(e.to_string()),
+                    duration: start.elapsed(),
+                }
+            }
+            None => {
+                let reason = if cancelled { "Cancelled by user" } else { "Timeout" };
+                crate::tools::ExecutionResult {
+                    content: reason.to_string(),
+                    success: false,
+                    error: Some(reason.to_string()),
+                    duration: start.elapsed(),
+                }
+            }
+        };
+
+        // Update UI
+        {
+            let mut r = self.renderer.lock().unwrap();
+            r.clear_input_hint();
+            if call.name == "bash" {
+                r.finalize_bash(
+                    execution_result.duration.as_secs_f64(),
+                    execution_result.success,
+                    cancelled,
+                );
+            } else {
+                r.add_tool_result(
+                    call.name.clone(),
+                    execution_result.content.clone(),
+                    Some(execution_result.duration.as_secs_f64()),
+                    execution_result.success,
+                    None,
+                );
+            }
+            r.render();
+        }
+
+        Ok(ToolResult {
+            tool_call_id: call.id.clone(),
+            content: execution_result.content,
+            success: execution_result.success,
+            error: execution_result.error,
+        })
     }
 
     fn spawn_spinner_task(&self, active: Arc<AtomicBool>, label: Arc<Mutex<String>>) -> tokio::task::JoinHandle<()> {
@@ -319,26 +414,18 @@ impl Agent {
         let os = whoami::distro();
 
         let mut tools_desc = String::new();
-        for tool in self.registry.list() {
-            tools_desc.push_str(&format!("- ```{}\\ncontent```: {}\n", tool.name(), tool.description()));
+        for tool in self.registry.get_all_definitions() {
+            tools_desc.push_str(&format!("- {}: {}\n", tool.name, tool.description));
         }
 
         format!(
-            r#"You are WAT, a terminal assistant. 
+            r#"You are WAT, a terminal assistant.
 OS: {} | CWD: {}
 
 Available Tools:
 {}
-Tool Rules:
-1. To call a tool, you MUST use the Markdown block format: 
-   ```tool_name
-   content
-   ```
-2. For bash, 'content' is the shell command.
-3. For read_file, 'content' is the file path.
-4. DO NOT write tool names as plain text. You MUST use code blocks.
-5. DO NOT try to run 'read_file' inside a 'bash' block.
-6. Prefer 'read_file' over 'cat' for reading files."#,
+You can use tools by calling them. The system will execute them and provide results.
+Be concise and helpful."#,
             os, cwd, tools_desc
         )
     }
