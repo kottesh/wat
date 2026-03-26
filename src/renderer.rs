@@ -651,7 +651,15 @@ impl DifferentialRenderer {
 
     /// Force a complete clear and redraw of the screen
     pub fn force_redraw(&mut self) {
-        print!("\x1b[2J\x1b[H"); // Clear screen and move to top
+        // If running inside tmux, explicitly clear the tmux scrollback buffer
+        if std::env::var("TMUX").is_ok() {
+            let _ = std::process::Command::new("tmux").arg("clear-history").status();
+        }
+        
+        // \x1b[3J = Clear scrollback buffer
+        // \x1b[2J = Clear visible screen
+        // \x1b[H  = Move cursor to top
+        print!("\x1b[3J\x1b[2J\x1b[H"); 
         let _ = io::stdout().flush();
         self.previous_lines.clear();
         self.cursor_row = 0;

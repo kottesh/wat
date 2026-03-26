@@ -2,6 +2,8 @@
 
 An inline terminal assistant with an agentic loop. Type your request, and it executes commands to help you.
 
+![wat](https://github.com/user-attachments/assets/20e43e08-94a6-4226-a56e-315107183541)
+
 ## Features
 
 - **Inline UI** - Appears at your command line with a clean input box
