@@ -11,7 +11,7 @@ use crate::{
     llm::{LlmClient, Message},
     renderer::SharedRenderer,
     terminal::{InputEvent, TerminalState},
-    tools::{self, ToolRegistry, ToolUpdate, ToolCall, StreamEvent, is_dangerous},
+    tools::{self, ToolRegistry, ToolUpdate},
 };
 
 pub struct Agent {
@@ -26,7 +26,7 @@ impl Agent {
     pub fn new(config: Config) -> Result<Self> {
         let terminal = TerminalState::new()?;
         let renderer = Arc::new(Mutex::new(
-            crate::renderer::DifferentialRenderer::new(config.ui.use_colors)
+            crate::renderer::DifferentialRenderer::new(true) // Always use colors
         ));
         let llm_client = LlmClient::new(config)?;
         Ok(Self { 

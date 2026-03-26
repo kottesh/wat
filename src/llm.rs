@@ -1,18 +1,25 @@
 use serde::{Deserialize, Serialize};
 use anyhow::{Result, Context};
-use crate::config::{Config, LlmProvider};
+use crate::config::{Config, ApiType};
 use futures_util::StreamExt;
 use futures_util::stream::BoxStream;
 
+// Constants for LLM parameters
+const DEFAULT_TEMPERATURE: f32 = 0.3;
+const DEFAULT_MAX_TOKENS: u32 = 2000;
+
 /// LLM client for different providers
 pub struct LlmClient {
-    config: Config,
+    base_url: String,
+    api_type: ApiType,
+    api_key: String,
+    model_id: String,
     client: reqwest::Client,
 }
 
-/// LLM request
+/// LLM request for OpenAI-style APIs
 #[derive(Debug, Serialize)]
-struct LlmRequest {
+struct OpenAiRequest {
     model: String,
     messages: Vec<Message>,
     temperature: f32,
@@ -50,43 +57,54 @@ impl LlmClient {
             .build()
             .context("Failed to create HTTP client")?;
         
-        Ok(Self { config, client })
+        Ok(Self {
+            base_url: config.base_url,
+            api_type: config.api_type,
+            api_key: config.api_key,
+            model_id: config.model_id,
+            client,
+        })
     }
     
     pub async fn query_stream(&self, messages: Vec<Message>) -> Result<BoxStream<'static, Result<String>>> {
-        let provider = self.config.llm.provider;
+        let api_type = self.api_type;
+        let base_url = self.base_url.clone();
+        let api_key = self.api_key.clone();
+        let model_id = self.model_id.clone();
         let client = self.client.clone();
-        let config = self.config.clone();
-
-        match provider {
-            LlmProvider::OpenAI | LlmProvider::Custom => {
-                let s = Self::stream_openai(client, config, messages).await?;
+        
+        match api_type {
+            ApiType::OpenAiCompletions => {
+                let s = Self::stream_openai_static(client, base_url, api_key, model_id, messages).await?;
                 Ok(s.boxed())
             }
-            LlmProvider::Anthropic => {
-                let s = Self::stream_anthropic(client, config, messages).await?;
+            ApiType::AnthropicMessages => {
+                let s = Self::stream_anthropic_static(client, base_url, api_key, model_id, messages).await?;
                 Ok(s.boxed())
             }
-            LlmProvider::Local => anyhow::bail!("Local LLM streaming not implemented"),
         }
     }
 
-    async fn stream_openai(client: reqwest::Client, config: Config, messages: Vec<Message>) -> Result<impl futures_util::Stream<Item = Result<String>>> {
-        let url = config.llm.base_url
-            .clone()
-            .unwrap_or_else(|| "https://api.openai.com/v1/chat/completions".to_string());
+    async fn stream_openai_static(
+        client: reqwest::Client,
+        base_url: String,
+        api_key: String,
+        model_id: String,
+        messages: Vec<Message>
+    ) -> Result<impl futures_util::Stream<Item = Result<String>>> {
+        let url = format!("{}/chat/completions", base_url);
         
-        let request = LlmRequest {
-            model: config.llm.model.clone(),
+        let request = OpenAiRequest {
+            model: model_id,
             messages,
-            temperature: config.llm.temperature,
-            max_tokens: config.llm.max_tokens,
+            temperature: DEFAULT_TEMPERATURE,
+            max_tokens: DEFAULT_MAX_TOKENS,
             stream: true,
         };
         
         let response = client
             .post(&url)
-            .header("Authorization", format!("Bearer {}", config.llm.api_key))
+            .header("Authorization", format!("Bearer {}", api_key))
             .header("Content-Type", "application/json")
             .json(&request)
             .send()
@@ -121,10 +139,14 @@ impl LlmClient {
         Ok(stream)
     }
 
-    async fn stream_anthropic(client: reqwest::Client, config: Config, messages: Vec<Message>) -> Result<impl futures_util::Stream<Item = Result<String>>> {
-        let url = config.llm.base_url
-            .clone()
-            .unwrap_or_else(|| "https://api.anthropic.com/v1/messages".to_string());
+    async fn stream_anthropic_static(
+        client: reqwest::Client,
+        base_url: String,
+        api_key: String,
+        model_id: String,
+        messages: Vec<Message>
+    ) -> Result<impl futures_util::Stream<Item = Result<String>>> {
+        let url = format!("{}/messages", base_url);
         
         let anthropic_messages: Vec<AnthropicMessage> = messages
             .into_iter()
@@ -135,16 +157,16 @@ impl LlmClient {
             .collect();
         
         let request = AnthropicStreamRequest {
-            model: config.llm.model.clone(),
+            model: model_id,
             messages: anthropic_messages,
-            max_tokens: config.llm.max_tokens,
-            temperature: config.llm.temperature,
+            max_tokens: DEFAULT_MAX_TOKENS,
+            temperature: DEFAULT_TEMPERATURE,
             stream: true,
         };
         
         let response = client
             .post(&url)
-            .header("x-api-key", &config.llm.api_key)
+            .header("x-api-key", &api_key)
             .header("anthropic-version", "2023-06-01")
             .header("Content-Type", "application/json")
             .json(&request)
