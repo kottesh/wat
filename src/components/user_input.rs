@@ -57,8 +57,8 @@ impl Component for UserInputComponent {
             }
         }
 
-        // Height: top padding + content lines + bottom padding
-        let height = (visual_lines.len() + 2) as u16;
+        // Height: just content lines (no padding)
+        let height = visual_lines.len() as u16;
         let mut buffer = Buffer::new(width, height);
         
         let bg_color = if self.state.use_colors {
@@ -67,21 +67,15 @@ impl Component for UserInputComponent {
             Color::Default
         };
 
-        // Top padding line - full width
-        buffer.fill_row(0, bg_color);
-
-        // Content lines with padding
+        // Content lines with background and padding
         for (idx, line) in visual_lines.iter().enumerate() {
-            let row = (idx + 1) as u16;
+            let row = idx as u16;
             buffer.fill_row(row, bg_color);
 
-            // Format: "  {content}  " with padding to fill width
-            let content_text = format!("  {}  ", line);
+            // Format: "  {content}" with padding
+            let content_text = format!("  {}", line);
             buffer.write_str(row, 0, &content_text, Color::Default, bg_color, Modifiers::default());
         }
-
-        // Bottom padding line
-        buffer.fill_row(height - 1, bg_color);
 
         buffer
     }
