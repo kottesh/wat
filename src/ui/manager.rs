@@ -410,14 +410,11 @@ fn buffer_to_lines(buffer: &crate::component::Buffer) -> Vec<String> {
         for cell in row {
             let style = format_cell_style(&cell.fg, &cell.bg, &cell.modifiers);
             if cur_style.as_deref() != Some(&style) {
+                // Flush previous style
                 if let Some(s) = cur_style.take() {
-                    if !s.is_empty() {
-                        line.push_str(&format!("\x1b[{}m", s));
-                    }
+                    line.push_str(&s); // Style already includes \x1b[...m
                     line.push_str(&cur_chars);
-                    if !s.is_empty() {
-                        line.push_str("\x1b[0m");
-                    }
+                    line.push_str("\x1b[0m"); // Reset
                     cur_chars.clear();
                 }
                 cur_style = Some(style);
@@ -428,12 +425,10 @@ fn buffer_to_lines(buffer: &crate::component::Buffer) -> Vec<String> {
         // Flush remaining
         if !cur_chars.is_empty() {
             if let Some(s) = cur_style {
-                if !s.is_empty() {
-                    line.push_str(&format!("\x1b[{}m", s));
-                }
+                line.push_str(&s); // Style already includes \x1b[...m
                 line.push_str(&cur_chars);
                 if !s.is_empty() {
-                    line.push_str("\x1b[0m");
+                    line.push_str("\x1b[0m"); // Reset
                 }
             } else {
                 line.push_str(&cur_chars);
