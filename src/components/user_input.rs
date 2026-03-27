@@ -57,8 +57,9 @@ impl Component for UserInputComponent {
             }
         }
 
-        // Height: just content lines (no padding)
-        let height = visual_lines.len() as u16;
+        // Height: content lines + top padding + bottom padding
+        let content_height = visual_lines.len() as u16;
+        let height = content_height + 2; // +1 top padding, +1 bottom padding
         let mut buffer = Buffer::new(width, height);
         
         let bg_color = if self.state.use_colors {
@@ -67,15 +68,22 @@ impl Component for UserInputComponent {
             Color::Default
         };
 
-        // Content lines with background and padding
+        // Top padding row (empty with background)
+        buffer.fill_row(0, bg_color);
+
+        // Content lines with background (offset by 1 for top padding)
         for (idx, line) in visual_lines.iter().enumerate() {
-            let row = idx as u16;
+            let row = idx as u16 + 1;
             buffer.fill_row(row, bg_color);
 
             // Format: "  {content}" with padding
             let content_text = format!("  {}", line);
             buffer.write_str(row, 0, &content_text, Color::Default, bg_color, Modifiers::default());
         }
+
+        // Bottom padding row (empty with background)
+        let bottom_row = content_height + 1;
+        buffer.fill_row(bottom_row, bg_color);
 
         buffer
     }
@@ -106,7 +114,11 @@ impl Component for UserInputComponent {
             lines += wrapped_lines;
         }
 
-        (lines + 2) as u16
+        (lines + 4) as u16  // +2 for content calculation, +2 for padding rows
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
     }
 
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any {

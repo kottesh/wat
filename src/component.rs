@@ -244,6 +244,9 @@ pub trait Component: std::fmt::Debug + Send {
     #[allow(dead_code)]
     fn preferred_height(&self, width: u16) -> u16;
 
+    /// Get a reference to self as Any for downcasting
+    fn as_any(&self) -> &dyn Any;
+
     /// Get a mutable reference to self as Any for downcasting
     #[allow(dead_code)]
     fn as_any_mut(&mut self) -> &mut dyn Any;

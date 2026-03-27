@@ -328,8 +328,15 @@ impl UIManager {
             self.last_terminal_size = self.terminal_size;
         }
 
-        let (lines, cursor_pos) = self.render_all();
-        self.diff_renderer.render(lines, cursor_pos);
+        // Trust the DiffRenderer to handle incremental updates
+        // (Removed force_clear during streaming - it caused flickering)
+
+        let (all_lines, cursor_pos) = self.render_all();
+        
+        // Apply viewport windowing to keep input box visible
+        let (visible_lines, adjusted_cursor) = self.apply_viewport(all_lines, cursor_pos);
+        
+        self.diff_renderer.render(visible_lines, adjusted_cursor);
     }
 
     fn render_all(&self) -> (Vec<String>, CursorPos) {
@@ -384,6 +391,28 @@ impl UIManager {
         let abs_cursor_row = content_lines.saturating_sub(input_len) + cursor_pos.0;
 
         (final_lines, (abs_cursor_row, cursor_pos.1))
+    }
+
+    /// Apply viewport windowing to keep input box visible
+    fn apply_viewport(&self, all_lines: Vec<String>, cursor_pos: CursorPos) -> (Vec<String>, CursorPos) {
+        let terminal_height = self.terminal_size.height as usize;
+        let total_lines = all_lines.len();
+        
+        // If all content fits on screen, no viewport needed
+        if total_lines <= terminal_height {
+            return (all_lines, cursor_pos);
+        }
+        
+        // Calculate viewport: show last terminal_height lines
+        // This keeps the input box (at the bottom) visible
+        let viewport_start = total_lines - terminal_height;
+        let visible_lines = all_lines[viewport_start..].to_vec();
+        
+        // Adjust cursor position relative to viewport
+        let (cursor_row, cursor_col) = cursor_pos;
+        let adjusted_row = cursor_row.saturating_sub(viewport_start);
+        
+        (visible_lines, (adjusted_row, cursor_col))
     }
 
     pub fn use_colors(&self) -> bool {

@@ -51,13 +51,11 @@ impl DiffRenderer {
         // 2. Write from first_changed up to the end of new_lines
         if new_len > first {
             for i in first..new_len {
-                if i > first {
-                    // Move to next line
-                    buf.push_str("\r\n");
-                    self.cursor_row += 1;
-                }
+                // Use absolute positioning - move to start of line i
+                buf.push_str(&format!("\x1b[{};1H", i + 1)); // row is 1-indexed in ANSI
                 buf.push_str("\x1b[2K"); // clear current line
-                buf.push_str(&new_lines[i]);
+                buf.push_str(&new_lines[i]); // write content
+                self.cursor_row = i; // update our tracking
             }
         }
 
@@ -114,14 +112,10 @@ impl DiffRenderer {
 
     /// Write ANSI codes to move to a specific line
     fn write_move_to_line(&mut self, buf: &mut String, target_row: usize) {
-        let diff = target_row as i64 - self.cursor_row as i64;
-        if diff > 0 {
-            buf.push_str(&"\n".repeat(diff as usize));
-        } else if diff < 0 {
-            buf.push_str(&format!("\x1b[{}A", -diff));
-        }
-        buf.push('\r');
+        // Use absolute positioning for consistency
+        buf.push_str(&format!("\x1b[{};1H", target_row + 1)); // row is 1-indexed
         self.cursor_row = target_row;
+        self.cursor_col = 0;
     }
 
     /// Move hardware cursor to a specific position
@@ -131,16 +125,9 @@ impl DiffRenderer {
         }
 
         let (row, col) = pos;
-        let diff = row as i64 - self.cursor_row as i64;
-
-        if diff > 0 {
-            print!("{}", "\n".repeat(diff as usize));
-        } else if diff < 0 {
-            print!("\x1b[{}A", -diff);
-        }
-
-        // Move to absolute column (1-indexed)
-        print!("\r\x1b[{}G", col + 1);
+        
+        // Use absolute positioning
+        print!("\x1b[{};{}H", row + 1, col + 1); // both are 1-indexed
         let _ = io::stdout().flush();
 
         self.cursor_row = row;

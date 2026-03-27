@@ -204,6 +204,10 @@ impl Component for BashComponent {
         self.render_lines(width as usize).len() as u16
     }
 
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
     fn as_any_mut(&mut self) -> &mut dyn Any {
         self
     }
