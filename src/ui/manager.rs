@@ -333,10 +333,8 @@ impl UIManager {
 
         let (all_lines, cursor_pos) = self.render_all();
         
-        // Apply viewport windowing to keep input box visible
-        let (visible_lines, adjusted_cursor) = self.apply_viewport(all_lines, cursor_pos);
-        
-        self.diff_renderer.render(visible_lines, adjusted_cursor);
+        // No viewport windowing - use native terminal scrollback
+        self.diff_renderer.render(all_lines, cursor_pos);
     }
 
     fn render_all(&self) -> (Vec<String>, CursorPos) {
@@ -394,27 +392,6 @@ impl UIManager {
     }
 
     /// Apply viewport windowing to keep input box visible
-    fn apply_viewport(&self, all_lines: Vec<String>, cursor_pos: CursorPos) -> (Vec<String>, CursorPos) {
-        let terminal_height = self.terminal_size.height as usize;
-        let total_lines = all_lines.len();
-        
-        // If all content fits on screen, no viewport needed
-        if total_lines <= terminal_height {
-            return (all_lines, cursor_pos);
-        }
-        
-        // Calculate viewport: show last terminal_height lines
-        // This keeps the input box (at the bottom) visible
-        let viewport_start = total_lines - terminal_height;
-        let visible_lines = all_lines[viewport_start..].to_vec();
-        
-        // Adjust cursor position relative to viewport
-        let (cursor_row, cursor_col) = cursor_pos;
-        let adjusted_row = cursor_row.saturating_sub(viewport_start);
-        
-        (visible_lines, (adjusted_row, cursor_col))
-    }
-
     pub fn use_colors(&self) -> bool {
         self.use_colors
     }
@@ -573,4 +550,6 @@ mod tests {
         let id2 = next_component_id();
         assert!(id2.0 > id1.0);
     }
+
+    // ── Scroll tests ──
 }

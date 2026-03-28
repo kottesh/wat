@@ -55,7 +55,12 @@ impl Agent {
     }
 
     async fn main_loop(&mut self, input_rx: &mut tokio::sync::mpsc::Receiver<InputEvent>) -> Result<()> {
-        self.renderer.lock().unwrap().render();
+        // Clear screen on startup to avoid cargo output mixing with UI
+        {
+            let mut r = self.renderer.lock().unwrap();
+            r.force_redraw();
+            r.render();
+        }
 
         loop {
             tokio::select! {

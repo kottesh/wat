@@ -10,6 +10,7 @@ pub struct DiffRenderer {
     previous_lines: Vec<String>,
     cursor_row: usize,
     cursor_col: usize,
+    lines_scrolled: usize,  // Track how many lines have scrolled off top
 }
 
 impl DiffRenderer {
@@ -19,13 +20,14 @@ impl DiffRenderer {
             previous_lines: Vec::new(),
             cursor_row: 0,
             cursor_col: 0,
+            lines_scrolled: 0,
         }
     }
 
     /// Render new lines with differential update
     /// 
-    /// Only writes changed lines to stdout, using ANSI escape sequences
-    /// for efficient terminal updates.
+    /// Uses scrolling region to keep content flowing while maintaining
+    /// input area at bottom of screen.
     pub fn render(&mut self, new_lines: Vec<String>, cursor_pos: CursorPos) {
         let new_len = new_lines.len();
 
@@ -39,29 +41,81 @@ impl DiffRenderer {
         }
 
         let first = first_changed.unwrap();
+        let prev_len = self.previous_lines.len();
         let mut buf = String::new();
+
+        // Get terminal height
+        let terminal_height = crossterm::terminal::size()
+            .map(|(_, h)| h as usize)
+            .unwrap_or(24);
 
         // Begin synchronized output (prevents flicker)
         buf.push_str("\x1b[?2026h"); // begin synchronized output
         buf.push_str("\x1b[?25l");    // hide cursor
 
-        // 1. Move to first changed line
-        self.write_move_to_line(&mut buf, first);
-
-        // 2. Write from first_changed up to the end of new_lines
-        if new_len > first {
+        // For all content: if it fits on screen, use absolute positioning
+        // If it doesn't fit, append with newlines (scroll naturally)
+        
+        if new_len <= terminal_height {
+            // Content fits on screen - use absolute positioning
             for i in first..new_len {
-                // Use absolute positioning - move to start of line i
-                buf.push_str(&format!("\x1b[{};1H", i + 1)); // row is 1-indexed in ANSI
-                buf.push_str("\x1b[2K"); // clear current line
-                buf.push_str(&new_lines[i]); // write content
-                self.cursor_row = i; // update our tracking
+                buf.push_str(&format!("\x1b[{};1H", i + 1));
+                buf.push_str("\x1b[2K");
+                buf.push_str(&new_lines[i]);
             }
+            
+            // Clear any leftover lines
+            if new_len < prev_len {
+                buf.push_str("\x1b[J");
+            }
+            
+            self.cursor_row = if new_len > 0 { new_len - 1 } else { 0 };
+            self.lines_scrolled = 0;
+        } else {
+            // Content exceeds screen - scroll naturally
+            // We need to append all new content
+            
+            if prev_len == 0 {
+                // First render with lots of content
+                // Just write everything sequentially
+                for (idx, line) in new_lines.iter().enumerate() {
+                    if idx > 0 {
+                        buf.push_str("\n");
+                    }
+                    buf.push_str("\x1b[2K");
+                    buf.push_str(line);
+                }
+                self.lines_scrolled = new_len.saturating_sub(terminal_height);
+            } else if new_len > prev_len {
+                // Content growing - append new lines
+                let lines_to_add = new_len - prev_len;
+                
+                // Scroll will happen - track it
+                if prev_len >= terminal_height {
+                    self.lines_scrolled += lines_to_add;
+                } else if new_len > terminal_height {
+                    self.lines_scrolled = new_len - terminal_height;
+                }
+                
+                // Append new lines
+                for i in prev_len..new_len {
+                    buf.push_str("\n");
+                    buf.push_str("\x1b[2K");
+                    buf.push_str(&new_lines[i]);
+                }
+            } else {
+                // Content same size or shrinking - rare, just redraw visible portion
+                let visible_start = new_len.saturating_sub(terminal_height);
+                for i in visible_start..new_len {
+                    let screen_row = i - visible_start + 1;
+                    buf.push_str(&format!("\x1b[{};1H", screen_row));
+                    buf.push_str("\x1b[2K");
+                    buf.push_str(&new_lines[i]);
+                }
+            }
+            
+            self.cursor_row = new_len.saturating_sub(1);
         }
-
-        // 3. Clear everything after our content to the end of the screen
-        // This handles cases where content shrunk and we have leftover lines
-        buf.push_str("\x1b[J");
 
         // End synchronized output
         buf.push_str("\x1b[?25h");    // show cursor
@@ -73,9 +127,8 @@ impl DiffRenderer {
 
         // Update state
         self.previous_lines = new_lines;
-        self.cursor_row = if new_len > 0 { new_len - 1 } else { 0 };
 
-        // 4. Finally, move to the desired logical cursor position
+        // Move cursor to final position
         self.move_cursor(cursor_pos);
     }
 
@@ -97,6 +150,7 @@ impl DiffRenderer {
         self.previous_lines.clear();
         self.cursor_row = 0;
         self.cursor_col = 0;
+        self.lines_scrolled = 0;
     }
 
     /// Find the first line that differs between old and new
@@ -120,14 +174,14 @@ impl DiffRenderer {
 
     /// Move hardware cursor to a specific position
     fn move_cursor(&mut self, pos: CursorPos) {
-        if self.previous_lines.is_empty() {
-            return;
-        }
-
         let (row, col) = pos;
         
-        // Use absolute positioning
-        print!("\x1b[{};{}H", row + 1, col + 1); // both are 1-indexed
+        // Adjust row for scrolling - cursor positions are relative to visible screen
+        // If lines have scrolled off top, subtract that offset
+        let screen_row = row.saturating_sub(self.lines_scrolled);
+        
+        // Use absolute positioning for cursor
+        print!("\x1b[{};{}H", screen_row + 1, col + 1);
         let _ = io::stdout().flush();
 
         self.cursor_row = row;
@@ -169,6 +223,7 @@ mod tests {
             previous_lines: vec!["line1".to_string(), "line2".to_string()],
             cursor_row: 0,
             cursor_col: 0,
+            lines_scrolled: 0,
         };
 
         let new_lines = vec!["line1".to_string(), "line2".to_string()];
@@ -181,6 +236,7 @@ mod tests {
             previous_lines: vec!["line1".to_string(), "line2".to_string()],
             cursor_row: 0,
             cursor_col: 0,
+            lines_scrolled: 0,
         };
 
         let new_lines = vec!["changed".to_string(), "line2".to_string()];
@@ -193,6 +249,7 @@ mod tests {
             previous_lines: vec!["line1".to_string(), "line2".to_string(), "line3".to_string()],
             cursor_row: 0,
             cursor_col: 0,
+            lines_scrolled: 0,
         };
 
         let new_lines = vec!["line1".to_string(), "changed".to_string(), "line3".to_string()];
@@ -205,6 +262,7 @@ mod tests {
             previous_lines: vec!["line1".to_string(), "line2".to_string()],
             cursor_row: 0,
             cursor_col: 0,
+            lines_scrolled: 0,
         };
 
         // New has more lines
@@ -229,6 +287,7 @@ mod tests {
             previous_lines: vec!["line1".to_string()],
             cursor_row: 0,
             cursor_col: 0,
+            lines_scrolled: 0,
         };
         let new_lines: Vec<String> = vec![];
         assert_eq!(renderer.find_first_change(&new_lines), Some(0));
@@ -240,11 +299,12 @@ mod tests {
             previous_lines: vec![],
             cursor_row: 2,
             cursor_col: 0,
+            lines_scrolled: 0,
         };
         let mut buf = String::new();
         renderer.write_move_to_line(&mut buf, 5);
 
-        assert_eq!(buf, "\n\n\n\r");
+        assert_eq!(buf, "\x1b[6;1H"); // absolute positioning: row 6 (5+1), col 1
         assert_eq!(renderer.cursor_row, 5);
     }
 
@@ -254,11 +314,12 @@ mod tests {
             previous_lines: vec![],
             cursor_row: 5,
             cursor_col: 0,
+            lines_scrolled: 0,
         };
         let mut buf = String::new();
         renderer.write_move_to_line(&mut buf, 2);
 
-        assert_eq!(buf, "\x1b[3A\r");
+        assert_eq!(buf, "\x1b[3;1H"); // absolute positioning: row 3 (2+1), col 1
         assert_eq!(renderer.cursor_row, 2);
     }
 
@@ -268,11 +329,12 @@ mod tests {
             previous_lines: vec![],
             cursor_row: 3,
             cursor_col: 0,
+            lines_scrolled: 0,
         };
         let mut buf = String::new();
         renderer.write_move_to_line(&mut buf, 3);
 
-        assert_eq!(buf, "\r");
+        assert_eq!(buf, "\x1b[4;1H"); // absolute positioning: row 4 (3+1), col 1
         assert_eq!(renderer.cursor_row, 3);
     }
 
