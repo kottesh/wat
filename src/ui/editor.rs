@@ -223,12 +223,12 @@ impl Editor {
         let mut cursor_row = 0;
         let mut cursor_col = 0;
 
-        let input_width = (width as usize).saturating_sub(4); // "  " prefix + padding
+        let input_width = (width as usize).saturating_sub(2); // "> " prefix
 
         if input_width == 0 {
             // Fallback for extremely narrow terminals
             for (i, line) in self.lines.iter().enumerate() {
-                lines.push(format!("  {}", line));
+                lines.push(format!("> {}", line));
                 if i == self.cursor_row {
                     cursor_row = lines.len() - 1;
                     let prefix: String = line.chars().take(self.cursor_col).collect();
@@ -241,7 +241,7 @@ impl Editor {
                 let is_cursor_line = i == self.cursor_row;
 
                 if line.is_empty() {
-                    lines.push("  ".to_string());
+                    lines.push("> ".to_string());
                     if is_cursor_line {
                         cursor_row = lines.len() - 1;
                         cursor_col = 2;
@@ -297,7 +297,7 @@ impl Editor {
                 }
 
                 for vl in visual_lines {
-                    lines.push(format!("  {}", vl));
+                    lines.push(format!("> {}", vl));
                 }
             }
         }
@@ -506,9 +506,9 @@ mod tests {
 
         assert_eq!(lines.len(), 3); // top border + content + bottom border
         assert!(lines[0].contains("─"));
-        assert_eq!(lines[1], "  test");
+        assert_eq!(lines[1], "> test");
         assert!(lines[2].contains("─"));
-        assert_eq!(cursor, (1, 6)); // row 1, col 6 ("  test" -> cursor after 't')
+        assert_eq!(cursor, (1, 6)); // row 1, col 6 ("> test" -> cursor after 't')
     }
 
     #[test]
@@ -520,8 +520,8 @@ mod tests {
         let (lines, cursor) = editor.render_with_border(80, false);
 
         assert_eq!(lines.len(), 4); // top border + 2 lines + bottom border
-        assert_eq!(lines[1], "  line1");
-        assert_eq!(lines[2], "  line2");
+        assert_eq!(lines[1], "> line1");
+        assert_eq!(lines[2], "> line2");
         assert_eq!(cursor, (2, 7)); // After "line2"
     }
 
