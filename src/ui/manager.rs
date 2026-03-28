@@ -362,6 +362,12 @@ impl UIManager {
             components.push((lines, Spacing::default()));
         }
 
+        // Render spinner if present (above input editor)
+        if let Some(ref spinner_text) = self.spinner_text {
+            let spinner_lines = vec![spinner_text.clone()];
+            components.push((spinner_lines, Spacing::none()));
+        }
+
         // Render fuzzy search or input editor
         let (input_lines, cursor_pos) = if let Some(ref fuzzy) = self.fuzzy {
             let lines = fuzzy.render(width);
@@ -371,8 +377,6 @@ impl UIManager {
             let (lines, cursor_row, cursor_col) = self.editor.render(
                 width,
                 self.use_colors,
-                self.spinner_text.clone(),
-                self.input_hint.clone(),
             );
             (lines, (cursor_row, cursor_col))
         };
@@ -386,7 +390,8 @@ impl UIManager {
 
         // Calculate absolute cursor position
         let content_lines = final_lines.len();
-        let abs_cursor_row = content_lines.saturating_sub(input_len) + cursor_pos.0;
+        let spinner_offset = if self.spinner_text.is_some() { 1 } else { 0 };
+        let abs_cursor_row = content_lines.saturating_sub(input_len + spinner_offset) + cursor_pos.0 + spinner_offset;
 
         (final_lines, (abs_cursor_row, cursor_pos.1))
     }

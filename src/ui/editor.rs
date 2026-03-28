@@ -60,18 +60,8 @@ impl Editor {
         &self,
         width: u16,
         use_colors: bool,
-        spinner: Option<String>,
-        hint: Option<String>,
     ) -> (Vec<String>, usize, usize) {
-        let (mut lines, (cursor_row, cursor_col)) = self.render_with_border(width, use_colors);
-        
-        // Add spinner or hint if present
-        if let Some(spinner_text) = spinner {
-            lines.push(format!("  {}", spinner_text));
-        } else if let Some(hint_text) = hint {
-            lines.push(format!("  {}", hint_text));
-        }
-        
+        let (lines, (cursor_row, cursor_col)) = self.render_with_border(width, use_colors);
         (lines, cursor_row, cursor_col)
     }
 
