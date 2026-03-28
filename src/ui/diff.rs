@@ -49,14 +49,16 @@ impl DiffRenderer {
             .map(|(_, h)| h as usize)
             .unwrap_or(24);
 
-        // Begin synchronized output (prevents flicker)
-        buf.push_str("\x1b[?2026h"); // begin synchronized output
+        // Hide cursor during update (prevents flicker)
         buf.push_str("\x1b[?25l");    // hide cursor
 
         // For all content: if it fits on screen, use absolute positioning
         // If it doesn't fit, append with newlines (scroll naturally)
         
-        if new_len <= terminal_height {
+        let prev_was_scrolled = self.lines_scrolled > 0;
+        let will_be_scrolled = new_len > terminal_height;
+        
+        if !will_be_scrolled {
             // Content fits on screen - use absolute positioning
             for i in first..new_len {
                 buf.push_str(&format!("\x1b[{};1H", i + 1));
@@ -71,55 +73,48 @@ impl DiffRenderer {
             
             self.cursor_row = if new_len > 0 { new_len - 1 } else { 0 };
             self.lines_scrolled = 0;
-        } else {
-            // Content exceeds screen - scroll naturally
-            // We need to append all new content
+        } else if !prev_was_scrolled && will_be_scrolled {
+            // Transition from fits → scrolled
+            // Clear screen first to avoid corruption from absolute positioning
+            buf.push_str("\x1b[2J\x1b[H"); // Clear screen, home cursor
             
-            if prev_len == 0 {
-                // First render with lots of content
-                // Just write everything sequentially
-                for (idx, line) in new_lines.iter().enumerate() {
-                    if idx > 0 {
-                        buf.push_str("\n");
-                    }
-                    buf.push_str("\x1b[2K");
-                    buf.push_str(line);
-                }
-                self.lines_scrolled = new_len.saturating_sub(terminal_height);
-            } else if new_len > prev_len {
-                // Content growing - append new lines
-                let lines_to_add = new_len - prev_len;
-                
-                // Scroll will happen - track it
-                if prev_len >= terminal_height {
-                    self.lines_scrolled += lines_to_add;
-                } else if new_len > terminal_height {
-                    self.lines_scrolled = new_len - terminal_height;
-                }
-                
-                // Append new lines
-                for i in prev_len..new_len {
+            // Redraw everything sequentially
+            for (idx, line) in new_lines.iter().enumerate() {
+                if idx > 0 {
                     buf.push_str("\n");
-                    buf.push_str("\x1b[2K");
-                    buf.push_str(&new_lines[i]);
                 }
-            } else {
-                // Content same size or shrinking - rare, just redraw visible portion
-                let visible_start = new_len.saturating_sub(terminal_height);
-                for i in visible_start..new_len {
-                    let screen_row = i - visible_start + 1;
-                    buf.push_str(&format!("\x1b[{};1H", screen_row));
-                    buf.push_str("\x1b[2K");
-                    buf.push_str(&new_lines[i]);
-                }
+                buf.push_str("\x1b[2K");
+                buf.push_str(line);
+            }
+            self.lines_scrolled = new_len.saturating_sub(terminal_height);
+            self.cursor_row = new_len.saturating_sub(1);
+        } else if new_len > prev_len {
+            // Content growing while already scrolled - append only
+            for i in prev_len..new_len {
+                buf.push_str("\n");
+                buf.push_str("\x1b[2K");
+                buf.push_str(&new_lines[i]);
+            }
+            
+            self.lines_scrolled += new_len - prev_len;
+            self.cursor_row = new_len.saturating_sub(1);
+        } else {
+            // Content same size while scrolled - update visible portion only
+            let visible_start = self.lines_scrolled;
+            let visible_end = (visible_start + terminal_height).min(new_len);
+            
+            for i in first.max(visible_start)..visible_end {
+                let screen_row = i - visible_start + 1;
+                buf.push_str(&format!("\x1b[{};1H", screen_row));
+                buf.push_str("\x1b[2K");
+                buf.push_str(&new_lines[i]);
             }
             
             self.cursor_row = new_len.saturating_sub(1);
         }
 
-        // End synchronized output
+        // Show cursor after update
         buf.push_str("\x1b[?25h");    // show cursor
-        buf.push_str("\x1b[?2026l"); // end synchronized output
 
         // Write all changes at once
         print!("{}", buf);
