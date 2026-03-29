@@ -320,13 +320,17 @@ impl UIManager {
     }
 
     pub fn render(&mut self) {
+        let old_size = self.terminal_size;
         self.update_size();
 
         // Detect terminal resize and force redraw
-        if self.terminal_size != self.last_terminal_size {
+        // Note: Inside tmux, resizing the pane won't trigger this - only resizing
+        // the actual terminal window will. Use Ctrl-L to manually clear if needed.
+        if self.terminal_size != old_size {
             self.force_redraw();
-            self.last_terminal_size = self.terminal_size;
         }
+        
+        self.last_terminal_size = self.terminal_size;
 
         // Trust the DiffRenderer to handle incremental updates
         // (Removed force_clear during streaming - it caused flickering)

@@ -98,11 +98,23 @@ impl DiffRenderer {
     }
 
     pub fn force_clear(&mut self) {
-        if std::env::var("TMUX").is_ok() {
-            let _ = std::process::Command::new("tmux").arg("clear-history").status();
-        }
+        // First, send escape sequences to clear screen and scrollback
+        // \x1b[3J - Clear scrollback buffer (supported by most modern terminals)
+        // \x1b[2J - Clear entire screen
+        // \x1b[H  - Move cursor to home (1,1)
         print!("\x1b[3J\x1b[2J\x1b[H");
         let _ = io::stdout().flush();
+        
+        // For tmux, also clear the tmux scrollback buffer
+        // This needs to happen after the ANSI codes are sent
+        if std::env::var("TMUX").is_ok() {
+            // Use shell to execute tmux clear-history for current pane
+            let _ = std::process::Command::new("sh")
+                .arg("-c")
+                .arg("tmux clear-history")
+                .output();
+        }
+        
         self.previous_lines.clear();
         self.cursor_is_at_row = 0;
     }

@@ -13,6 +13,8 @@ pub enum InputEvent {
     Cancel,
     /// User pressed Ctrl-C or similar shutdown signal.
     Shutdown,
+    /// Terminal was resized.
+    Resize,
 }
 
 pub struct TerminalState {
@@ -59,6 +61,7 @@ impl TerminalState {
             if let Ok(mut sigwinch) = signal(SignalKind::window_change()) {
                 while sigwinch.recv().await.is_some() {
                     let mut renderer_lock = renderer_for_winch.lock().unwrap();
+                    renderer_lock.force_redraw();
                     renderer_lock.render();
                 }
             }

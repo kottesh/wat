@@ -67,6 +67,7 @@ impl Agent {
                     match event {
                         InputEvent::Shutdown => return Ok(()),
                         InputEvent::Cancel => { self.renderer.lock().unwrap().render(); }
+                        InputEvent::Resize => { /* Handled by SIGWINCH in terminal.rs */ }
                         InputEvent::Submit(raw) => {
                             let input = raw.trim().to_string();
                             if input.is_empty() { continue; }
