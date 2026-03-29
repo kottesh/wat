@@ -363,13 +363,22 @@ impl UIManager {
         }
 
         // Render spinner if present (above input editor)
-        if let Some(ref spinner_text) = self.spinner_text {
-            let spinner_lines = vec![spinner_text.clone()];
-            components.push((spinner_lines, Spacing::none()));
-        }
+        let spinner_lines = if let Some(ref spinner_text) = self.spinner_text {
+            let lines = vec![spinner_text.clone()];
+            components.push((lines.clone(), Spacing::none()));
+            lines.len()
+        } else {
+            0
+        };
+
+        // Track where input block starts (before we add it)
+        let input_block_start = {
+            let stacked_before_input = Layout::stack_with_spacing(components.clone());
+            stacked_before_input.len()
+        };
 
         // Render fuzzy search or input editor
-        let (input_lines, cursor_pos) = if let Some(ref fuzzy) = self.fuzzy {
+        let (input_lines, input_cursor_pos) = if let Some(ref fuzzy) = self.fuzzy {
             let lines = fuzzy.render(width);
             let cursor = (lines.len().saturating_sub(1), 0);
             (lines, cursor)
@@ -381,19 +390,19 @@ impl UIManager {
             (lines, (cursor_row, cursor_col))
         };
 
-        let input_len = input_lines.len();
         components.push((input_lines, Spacing::none()));
 
         // Stack all components
         let all_lines = Layout::stack_with_spacing(components);
         let final_lines = Layout::trim_trailing_blank(all_lines);
 
-        // Calculate absolute cursor position
-        let content_lines = final_lines.len();
-        let spinner_offset = if self.spinner_text.is_some() { 1 } else { 0 };
-        let abs_cursor_row = content_lines.saturating_sub(input_len + spinner_offset) + cursor_pos.0 + spinner_offset;
+        // Calculate absolute cursor position:
+        // input_block_start is where input starts in the final buffer.
+        // Add the cursor offset within the input block.
+        let abs_cursor_row = input_block_start + spinner_lines + input_cursor_pos.0;
+        let abs_cursor_col = input_cursor_pos.1;
 
-        (final_lines, (abs_cursor_row, cursor_pos.1))
+        (final_lines, (abs_cursor_row, abs_cursor_col))
     }
 
     /// Apply viewport windowing to keep input box visible
@@ -554,6 +563,56 @@ mod tests {
         let id1 = next_component_id();
         let id2 = next_component_id();
         assert!(id2.0 > id1.0);
+    }
+
+    #[test]
+    fn test_cursor_position_with_spinner() {
+        let mut ui = UIManager::new(false);
+        
+        ui.add_response("Line 1".to_string());
+        ui.set_spinner("Loading...".to_string());
+        ui.push_input_char('h');
+        ui.push_input_char('i');
+        
+        let (lines, cursor) = ui.render_all();
+        
+        // Cursor should be positioned at the input area
+        // Not at the spinner or earlier content
+        assert!(cursor.0 > 0, "Cursor row should be > 0");
+        assert!(cursor.0 < lines.len(), "Cursor should be within rendered lines");
+    }
+
+    #[test]
+    fn test_cursor_position_multiline_input() {
+        let mut ui = UIManager::new(false);
+        
+        ui.push_input_char('a');
+        ui.insert_newline();
+        ui.push_input_char('b');
+        ui.insert_newline();
+        ui.push_input_char('c');
+        
+        let (lines, cursor) = ui.render_all();
+        
+        // Editor has borders + 3 lines of input
+        // Should have at least 5 lines total (top border, 3 input lines, bottom border)
+        assert!(lines.len() >= 5, "Should have at least 5 lines (borders + 3-line input)");
+        // Cursor column should be after 'c' which is at position 1 ("> c|")
+        assert_eq!(cursor.1, 3, "Cursor column should be at position 3 (after '> c')");
+    }
+
+    #[test]
+    fn test_cursor_position_empty_history() {
+        let mut ui = UIManager::new(false);
+        
+        ui.push_input_char('x');
+        
+        let (_lines, cursor) = ui.render_all();
+        
+        // With only input, cursor should be after border (row 1)
+        // Editor renders: top border, "> x|", bottom border
+        assert!(cursor.0 >= 1, "Cursor should be after top border");
+        assert_eq!(cursor.1, 3, "Cursor column should be at position 3 (after '> x')");
     }
 
     // ── Scroll tests ──

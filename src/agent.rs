@@ -55,10 +55,9 @@ impl Agent {
     }
 
     async fn main_loop(&mut self, input_rx: &mut tokio::sync::mpsc::Receiver<InputEvent>) -> Result<()> {
-        // Clear screen on startup to avoid cargo output mixing with UI
+        // Render initial state without clearing screen
         {
             let mut r = self.renderer.lock().unwrap();
-            r.force_redraw();
             r.render();
         }
 

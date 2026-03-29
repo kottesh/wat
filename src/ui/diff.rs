@@ -1,342 +1,125 @@
-//! Differential renderer - pure line diffing and ANSI output
+//! Inline diff renderer - updates same lines in place
 
 use std::io::{self, Write};
 
-/// Cursor position (row, col)
 pub type CursorPos = (usize, usize);
 
-/// Pure differential renderer - no business logic
 pub struct DiffRenderer {
     previous_lines: Vec<String>,
-    cursor_row: usize,
-    cursor_col: usize,
-    lines_scrolled: usize,  // Track how many lines have scrolled off top
+    cursor_is_at_row: usize, // Track where cursor actually is (0-indexed)
 }
 
 impl DiffRenderer {
-    /// Create a new differential renderer
     pub fn new() -> Self {
         Self {
             previous_lines: Vec::new(),
-            cursor_row: 0,
-            cursor_col: 0,
-            lines_scrolled: 0,
+            cursor_is_at_row: 0,
         }
     }
 
-    /// Render new lines with differential update
-    /// 
-    /// Uses scrolling region to keep content flowing while maintaining
-    /// input area at bottom of screen.
     pub fn render(&mut self, new_lines: Vec<String>, cursor_pos: CursorPos) {
+        let prev_len = self.previous_lines.len();
         let new_len = new_lines.len();
-
-        // Find first changed line
-        let first_changed = self.find_first_change(&new_lines);
-
-        // If nothing changed, just update cursor position and return
-        if first_changed.is_none() {
-            self.move_cursor(cursor_pos);
+        
+        // Check if anything changed
+        let changed = prev_len != new_len || 
+                     self.previous_lines.iter().zip(&new_lines).any(|(a, b)| a != b);
+        
+        if !changed {
             return;
         }
 
-        let first = first_changed.unwrap();
-        let prev_len = self.previous_lines.len();
-        let mut buf = String::new();
-
-        // Get terminal height
-        let terminal_height = crossterm::terminal::size()
-            .map(|(_, h)| h as usize)
-            .unwrap_or(24);
-
-        // Hide cursor during update (prevents flicker)
-        buf.push_str("\x1b[?25l");    // hide cursor
-
-        // For all content: if it fits on screen, use absolute positioning
-        // If it doesn't fit, append with newlines (scroll naturally)
+        let mut output = String::new();
+        output.push_str("\x1b[?25l"); // Hide cursor
         
-        let prev_was_scrolled = self.lines_scrolled > 0;
-        let will_be_scrolled = new_len > terminal_height;
-        
-        if !will_be_scrolled {
-            // Content fits on screen - use absolute positioning
-            for i in first..new_len {
-                buf.push_str(&format!("\x1b[{};1H", i + 1));
-                buf.push_str("\x1b[2K");
-                buf.push_str(&new_lines[i]);
-            }
-            
-            // Clear any leftover lines
-            if new_len < prev_len {
-                buf.push_str("\x1b[J");
-            }
-            
-            self.cursor_row = if new_len > 0 { new_len - 1 } else { 0 };
-            self.lines_scrolled = 0;
-        } else if !prev_was_scrolled && will_be_scrolled {
-            // Transition from fits → scrolled
-            // Clear screen first to avoid corruption from absolute positioning
-            buf.push_str("\x1b[2J\x1b[H"); // Clear screen, home cursor
-            
-            // Redraw everything sequentially
-            for (idx, line) in new_lines.iter().enumerate() {
-                if idx > 0 {
-                    buf.push_str("\n");
+        if prev_len == 0 {
+            // First render - just print the lines
+            for (i, line) in new_lines.iter().enumerate() {
+                output.push_str(line);
+                if i < new_len - 1 {
+                    output.push_str("\r\n");
                 }
-                buf.push_str("\x1b[2K");
-                buf.push_str(line);
             }
-            self.lines_scrolled = new_len.saturating_sub(terminal_height);
-            self.cursor_row = new_len.saturating_sub(1);
-        } else if new_len > prev_len {
-            // Content growing while already scrolled - append only
-            for i in prev_len..new_len {
-                buf.push_str("\n");
-                buf.push_str("\x1b[2K");
-                buf.push_str(&new_lines[i]);
-            }
-            
-            self.lines_scrolled += new_len - prev_len;
-            self.cursor_row = new_len.saturating_sub(1);
+            // After first render, cursor is at last line
+            self.cursor_is_at_row = new_len.saturating_sub(1);
         } else {
-            // Content same size while scrolled - update visible portion only
-            let visible_start = self.lines_scrolled;
-            let visible_end = (visible_start + terminal_height).min(new_len);
+            // Move to first line from wherever cursor currently is
+            if self.cursor_is_at_row > 0 {
+                output.push_str(&format!("\x1b[{}A", self.cursor_is_at_row));
+            }
+            output.push_str("\r");
             
-            for i in first.max(visible_start)..visible_end {
-                let screen_row = i - visible_start + 1;
-                buf.push_str(&format!("\x1b[{};1H", screen_row));
-                buf.push_str("\x1b[2K");
-                buf.push_str(&new_lines[i]);
+            // Update each line by clearing and rewriting
+            for (i, line) in new_lines.iter().enumerate() {
+                output.push_str("\x1b[K"); // Clear from cursor to end of line
+                output.push_str(line);
+                if i < new_len - 1 {
+                    output.push_str("\r\n"); // Move to next line
+                }
             }
             
-            self.cursor_row = new_len.saturating_sub(1);
+            // If shrinking, clear the extra lines
+            if new_len < prev_len {
+                for _ in new_len..prev_len {
+                    output.push_str("\r\n\x1b[K");
+                }
+                // Move back to last content line
+                if prev_len > new_len {
+                    output.push_str(&format!("\x1b[{}A", prev_len - new_len));
+                }
+            }
+            
+            // After redrawing, cursor is at last line
+            self.cursor_is_at_row = new_len.saturating_sub(1);
         }
-
-        // Show cursor after update
-        buf.push_str("\x1b[?25h");    // show cursor
-
-        // Write all changes at once
-        print!("{}", buf);
+        
+        // Position cursor at desired location
+        let (target_row, target_col) = cursor_pos;
+        
+        if target_row < self.cursor_is_at_row {
+            output.push_str(&format!("\x1b[{}A", self.cursor_is_at_row - target_row));
+        } else if target_row > self.cursor_is_at_row && target_row < new_len {
+            output.push_str(&format!("\x1b[{}B", target_row - self.cursor_is_at_row));
+        }
+        output.push_str("\r");
+        if target_col > 0 {
+            output.push_str(&format!("\x1b[{}C", target_col));
+        }
+        
+        // Update where cursor ended up
+        self.cursor_is_at_row = target_row;
+        
+        output.push_str("\x1b[?25h"); // Show cursor
+        
+        print!("{}", output);
         let _ = io::stdout().flush();
-
-        // Update state
+        
         self.previous_lines = new_lines;
-
-        // Move cursor to final position
-        self.move_cursor(cursor_pos);
     }
 
-    /// Force a complete clear and redraw of the screen
     pub fn force_clear(&mut self) {
-        // If running inside tmux, explicitly clear the tmux scrollback buffer
         if std::env::var("TMUX").is_ok() {
-            let _ = std::process::Command::new("tmux")
-                .arg("clear-history")
-                .status();
+            let _ = std::process::Command::new("tmux").arg("clear-history").status();
         }
-
-        // \x1b[3J = Clear scrollback buffer
-        // \x1b[2J = Clear visible screen
-        // \x1b[H  = Move cursor to top
         print!("\x1b[3J\x1b[2J\x1b[H");
         let _ = io::stdout().flush();
-
         self.previous_lines.clear();
-        self.cursor_row = 0;
-        self.cursor_col = 0;
-        self.lines_scrolled = 0;
+        self.cursor_is_at_row = 0;
     }
 
-    /// Find the first line that differs between old and new
-    fn find_first_change(&self, new_lines: &[String]) -> Option<usize> {
-        let max_len = new_lines.len().max(self.previous_lines.len());
-        for i in 0..max_len {
-            if self.previous_lines.get(i) != new_lines.get(i) {
-                return Some(i);
-            }
-        }
-        None
-    }
-
-    /// Write ANSI codes to move to a specific line
-    fn write_move_to_line(&mut self, buf: &mut String, target_row: usize) {
-        // Use absolute positioning for consistency
-        buf.push_str(&format!("\x1b[{};1H", target_row + 1)); // row is 1-indexed
-        self.cursor_row = target_row;
-        self.cursor_col = 0;
-    }
-
-    /// Move hardware cursor to a specific position
-    fn move_cursor(&mut self, pos: CursorPos) {
-        let (row, col) = pos;
-        
-        // Adjust row for scrolling - cursor positions are relative to visible screen
-        // If lines have scrolled off top, subtract that offset
-        let screen_row = row.saturating_sub(self.lines_scrolled);
-        
-        // Use absolute positioning for cursor
-        print!("\x1b[{};{}H", screen_row + 1, col + 1);
-        let _ = io::stdout().flush();
-
-        self.cursor_row = row;
-        self.cursor_col = col;
-    }
-
-    /// Get current cursor position
-    pub fn cursor_pos(&self) -> CursorPos {
-        (self.cursor_row, self.cursor_col)
-    }
-
-    /// Get previous lines (for testing)
     #[cfg(test)]
     pub fn previous_lines(&self) -> &[String] {
         &self.previous_lines
+    }
+    
+    #[cfg(test)]
+    pub fn cursor_pos(&self) -> CursorPos {
+        (self.cursor_is_at_row, 0)
     }
 }
 
 impl Default for DiffRenderer {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_new_renderer() {
-        let renderer = DiffRenderer::new();
-        assert_eq!(renderer.previous_lines().len(), 0);
-        assert_eq!(renderer.cursor_pos(), (0, 0));
-    }
-
-    #[test]
-    fn test_find_first_change_no_change() {
-        let renderer = DiffRenderer {
-            previous_lines: vec!["line1".to_string(), "line2".to_string()],
-            cursor_row: 0,
-            cursor_col: 0,
-            lines_scrolled: 0,
-        };
-
-        let new_lines = vec!["line1".to_string(), "line2".to_string()];
-        assert_eq!(renderer.find_first_change(&new_lines), None);
-    }
-
-    #[test]
-    fn test_find_first_change_at_start() {
-        let renderer = DiffRenderer {
-            previous_lines: vec!["line1".to_string(), "line2".to_string()],
-            cursor_row: 0,
-            cursor_col: 0,
-            lines_scrolled: 0,
-        };
-
-        let new_lines = vec!["changed".to_string(), "line2".to_string()];
-        assert_eq!(renderer.find_first_change(&new_lines), Some(0));
-    }
-
-    #[test]
-    fn test_find_first_change_in_middle() {
-        let renderer = DiffRenderer {
-            previous_lines: vec!["line1".to_string(), "line2".to_string(), "line3".to_string()],
-            cursor_row: 0,
-            cursor_col: 0,
-            lines_scrolled: 0,
-        };
-
-        let new_lines = vec!["line1".to_string(), "changed".to_string(), "line3".to_string()];
-        assert_eq!(renderer.find_first_change(&new_lines), Some(1));
-    }
-
-    #[test]
-    fn test_find_first_change_length_diff() {
-        let renderer = DiffRenderer {
-            previous_lines: vec!["line1".to_string(), "line2".to_string()],
-            cursor_row: 0,
-            cursor_col: 0,
-            lines_scrolled: 0,
-        };
-
-        // New has more lines
-        let new_lines = vec!["line1".to_string(), "line2".to_string(), "line3".to_string()];
-        assert_eq!(renderer.find_first_change(&new_lines), Some(2));
-
-        // New has fewer lines
-        let new_lines = vec!["line1".to_string()];
-        assert_eq!(renderer.find_first_change(&new_lines), Some(1));
-    }
-
-    #[test]
-    fn test_find_first_change_empty_to_content() {
-        let renderer = DiffRenderer::new();
-        let new_lines = vec!["line1".to_string()];
-        assert_eq!(renderer.find_first_change(&new_lines), Some(0));
-    }
-
-    #[test]
-    fn test_find_first_change_content_to_empty() {
-        let renderer = DiffRenderer {
-            previous_lines: vec!["line1".to_string()],
-            cursor_row: 0,
-            cursor_col: 0,
-            lines_scrolled: 0,
-        };
-        let new_lines: Vec<String> = vec![];
-        assert_eq!(renderer.find_first_change(&new_lines), Some(0));
-    }
-
-    #[test]
-    fn test_write_move_to_line_forward() {
-        let mut renderer = DiffRenderer {
-            previous_lines: vec![],
-            cursor_row: 2,
-            cursor_col: 0,
-            lines_scrolled: 0,
-        };
-        let mut buf = String::new();
-        renderer.write_move_to_line(&mut buf, 5);
-
-        assert_eq!(buf, "\x1b[6;1H"); // absolute positioning: row 6 (5+1), col 1
-        assert_eq!(renderer.cursor_row, 5);
-    }
-
-    #[test]
-    fn test_write_move_to_line_backward() {
-        let mut renderer = DiffRenderer {
-            previous_lines: vec![],
-            cursor_row: 5,
-            cursor_col: 0,
-            lines_scrolled: 0,
-        };
-        let mut buf = String::new();
-        renderer.write_move_to_line(&mut buf, 2);
-
-        assert_eq!(buf, "\x1b[3;1H"); // absolute positioning: row 3 (2+1), col 1
-        assert_eq!(renderer.cursor_row, 2);
-    }
-
-    #[test]
-    fn test_write_move_to_line_same() {
-        let mut renderer = DiffRenderer {
-            previous_lines: vec![],
-            cursor_row: 3,
-            cursor_col: 0,
-            lines_scrolled: 0,
-        };
-        let mut buf = String::new();
-        renderer.write_move_to_line(&mut buf, 3);
-
-        assert_eq!(buf, "\x1b[4;1H"); // absolute positioning: row 4 (3+1), col 1
-        assert_eq!(renderer.cursor_row, 3);
-    }
-
-    #[test]
-    fn test_default() {
-        let renderer = DiffRenderer::default();
-        assert_eq!(renderer.previous_lines().len(), 0);
-        assert_eq!(renderer.cursor_pos(), (0, 0));
     }
 }

@@ -33,6 +33,9 @@ impl TerminalState {
         termios::cfmakeraw(&mut raw);
         termios::tcsetattr(stdin.as_fd(), termios::SetArg::TCSANOW, &raw)
             .context("Failed to enter raw mode")?;
+        
+        // Do NOT enable mouse tracking - we want native terminal scrollback to work
+        
         Ok(())
     }
 
@@ -237,7 +240,20 @@ fn get_escape_type(fd: i32) -> EscapeType {
 
     match b1[0] {
         b'\r' | b'\n' => EscapeType::AltEnter,
-        b'[' | b'O' => {
+        b'[' => {
+            let mut b2 = [0u8; 1];
+            if unsafe { libc::read(fd, b2.as_mut_ptr() as *mut libc::c_void, 1) } <= 0 {
+                return EscapeType::Unknown;
+            }
+            match b2[0] {
+                b'A' => EscapeType::ArrowUp,
+                b'B' => EscapeType::ArrowDown,
+                b'C' => EscapeType::ArrowRight,
+                b'D' => EscapeType::ArrowLeft,
+                _ => EscapeType::Unknown,
+            }
+        }
+        b'O' => {
             let mut b2 = [0u8; 1];
             if unsafe { libc::read(fd, b2.as_mut_ptr() as *mut libc::c_void, 1) } <= 0 {
                 return EscapeType::Unknown;
