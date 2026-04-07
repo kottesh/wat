@@ -209,85 +209,86 @@ impl OpenAiProvider {
             })
             .collect()
     }
-
 }
 
 /// Parse a single SSE line (static function for use in streams)
 fn parse_sse_line_static(line: &str) -> Option<Vec<StreamChunk>> {
-        if !line.starts_with("data: ") {
-            return None;
+    if !line.starts_with("data: ") {
+        return None;
+    }
+
+    let data = line.trim_start_matches("data: ").trim();
+    if data == "[DONE]" {
+        return None;
+    }
+
+    let parsed: StreamResponse = match serde_json::from_str(data) {
+        Ok(p) => p,
+        Err(_) => return None,
+    };
+
+    let mut chunks = Vec::new();
+
+    for choice in parsed.choices {
+        // Handle finish reason
+        if let Some(reason) = choice.finish_reason {
+            let finish = match reason.as_str() {
+                "stop" => FinishReason::Stop,
+                "tool_calls" => FinishReason::ToolCalls,
+                "length" => FinishReason::Length,
+                "content_filter" => FinishReason::ContentFilter,
+                other => FinishReason::Error(format!("Unknown finish reason: {}", other)),
+            };
+            chunks.push(StreamChunk::Done {
+                finish_reason: finish,
+            });
+            continue;
         }
 
-        let data = line.trim_start_matches("data: ").trim();
-        if data == "[DONE]" {
-            return None;
-        }
-
-        let parsed: StreamResponse = match serde_json::from_str(data) {
-            Ok(p) => p,
-            Err(_) => return None,
-        };
-
-        let mut chunks = Vec::new();
-
-        for choice in parsed.choices {
-            // Handle finish reason
-            if let Some(reason) = choice.finish_reason {
-                let finish = match reason.as_str() {
-                    "stop" => FinishReason::Stop,
-                    "tool_calls" => FinishReason::ToolCalls,
-                    "length" => FinishReason::Length,
-                    "content_filter" => FinishReason::ContentFilter,
-                    other => FinishReason::Error(format!("Unknown finish reason: {}", other)),
-                };
-                chunks.push(StreamChunk::Done { finish_reason: finish });
-                continue;
+        // Handle text delta
+        if let Some(content) = choice.delta.content {
+            if !content.is_empty() {
+                chunks.push(StreamChunk::TextDelta(content));
             }
+        }
 
-            // Handle text delta
-            if let Some(content) = choice.delta.content {
-                if !content.is_empty() {
-                    chunks.push(StreamChunk::TextDelta(content));
+        // Handle tool calls
+        if let Some(tool_calls) = choice.delta.tool_calls {
+            for tc in tool_calls {
+                // Tool call started (has id and name)
+                if let (Some(id), Some(func)) = (&tc.id, &tc.function) {
+                    if let Some(name) = &func.name {
+                        chunks.push(StreamChunk::ToolCallStart {
+                            id: id.clone(),
+                            name: name.clone(),
+                            index: tc.index,
+                        });
+                    }
                 }
-            }
 
-            // Handle tool calls
-            if let Some(tool_calls) = choice.delta.tool_calls {
-                for tc in tool_calls {
-                    // Tool call started (has id and name)
-                    if let (Some(id), Some(func)) = (&tc.id, &tc.function) {
-                        if let Some(name) = &func.name {
-                            chunks.push(StreamChunk::ToolCallStart {
-                                id: id.clone(),
-                                name: name.clone(),
+                // Arguments delta
+                if let Some(func) = &tc.function {
+                    if let Some(args) = &func.arguments {
+                        if !args.is_empty() {
+                            // We need an ID for the delta - try to get it from previous context
+                            // For now, use empty string - will be handled by accumulator
+                            chunks.push(StreamChunk::ToolCallArgsDelta {
+                                id: tc.id.clone().unwrap_or_default(),
                                 index: tc.index,
+                                args_json_delta: args.clone(),
                             });
                         }
                     }
-
-                    // Arguments delta
-                    if let Some(func) = &tc.function {
-                        if let Some(args) = &func.arguments {
-                            if !args.is_empty() {
-                                // We need an ID for the delta - try to get it from previous context
-                                // For now, use empty string - will be handled by accumulator
-                                chunks.push(StreamChunk::ToolCallArgsDelta {
-                                    id: tc.id.clone().unwrap_or_default(),
-                                    index: tc.index,
-                                    args_json_delta: args.clone(),
-                                });
-                            }
-                        }
-                    }
                 }
             }
         }
+    }
 
-        if chunks.is_empty() {
-            None
-        } else {
-            Some(chunks)
-        }
+    if chunks.is_empty() {
+        None
+    } else {
+        Some(chunks)
+    }
 }
 
 #[async_trait]
@@ -487,7 +488,11 @@ mod tests {
 
         assert!(!chunks.is_empty());
         match &chunks[0] {
-            StreamChunk::ToolCallArgsDelta { args_json_delta, index, .. } => {
+            StreamChunk::ToolCallArgsDelta {
+                args_json_delta,
+                index,
+                ..
+            } => {
                 assert_eq!(args_json_delta, "{\"");
                 assert_eq!(*index, 0);
             }

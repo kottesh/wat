@@ -1,10 +1,9 @@
 //! Terminal raw-mode management and line input.
 
+use anyhow::{Context, Result};
+use nix::sys::termios;
 use std::io::{self, Write};
 use std::os::fd::AsFd;
-use nix::sys::termios;
-use anyhow::{Result, Context};
-
 
 pub enum InputEvent {
     /// User pressed Enter with the current input string.
@@ -24,8 +23,8 @@ pub struct TerminalState {
 impl TerminalState {
     pub fn new() -> Result<Self> {
         let stdin = io::stdin();
-        let original_termios = termios::tcgetattr(stdin.as_fd())
-            .context("Failed to get terminal attributes")?;
+        let original_termios =
+            termios::tcgetattr(stdin.as_fd()).context("Failed to get terminal attributes")?;
         Ok(Self { original_termios })
     }
 
@@ -35,16 +34,20 @@ impl TerminalState {
         termios::cfmakeraw(&mut raw);
         termios::tcsetattr(stdin.as_fd(), termios::SetArg::TCSANOW, &raw)
             .context("Failed to enter raw mode")?;
-        
+
         // Do NOT enable mouse tracking - we want native terminal scrollback to work
-        
+
         Ok(())
     }
 
     pub fn exit_raw_mode(&self) -> Result<()> {
         let stdin = io::stdin();
-        termios::tcsetattr(stdin.as_fd(), termios::SetArg::TCSANOW, &self.original_termios)
-            .context("Failed to restore terminal")?;
+        termios::tcsetattr(
+            stdin.as_fd(),
+            termios::SetArg::TCSANOW,
+            &self.original_termios,
+        )
+        .context("Failed to restore terminal")?;
         io::stdout().flush()?;
         Ok(())
     }
@@ -54,10 +57,10 @@ impl TerminalState {
         renderer: crate::ui::SharedRenderer,
     ) -> tokio::sync::mpsc::Receiver<InputEvent> {
         let (tx, rx) = tokio::sync::mpsc::channel(100);
-        
+
         let renderer_for_winch = renderer.clone();
         tokio::spawn(async move {
-            use tokio::signal::unix::{signal, SignalKind};
+            use tokio::signal::unix::{SignalKind, signal};
             if let Ok(mut sigwinch) = signal(SignalKind::window_change()) {
                 while sigwinch.recv().await.is_some() {
                     let mut renderer_lock = renderer_for_winch.lock().unwrap();
@@ -232,9 +235,15 @@ enum EscapeType {
 
 fn get_escape_type(fd: i32) -> EscapeType {
     // Check if more data is available
-    let mut pfd = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
+    let mut pfd = libc::pollfd {
+        fd,
+        events: libc::POLLIN,
+        revents: 0,
+    };
     let ret = unsafe { libc::poll(&mut pfd as *mut _, 1, 20) };
-    if ret <= 0 { return EscapeType::Plain; }
+    if ret <= 0 {
+        return EscapeType::Plain;
+    }
 
     let mut b1 = [0u8; 1];
     if unsafe { libc::read(fd, b1.as_mut_ptr() as *mut libc::c_void, 1) } <= 0 {

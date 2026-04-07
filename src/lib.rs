@@ -6,10 +6,10 @@
 pub mod component;
 pub mod components;
 // Old renderer removed - replaced by ui module
-pub mod terminal;
 pub mod agent;
 pub mod config;
 pub mod llm;
+pub mod terminal;
 pub mod tools;
 pub mod ui;
 

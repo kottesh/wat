@@ -56,11 +56,7 @@ impl Editor {
     }
 
     /// Render with optional spinner and hint
-    pub fn render(
-        &self,
-        width: u16,
-        use_colors: bool,
-    ) -> (Vec<String>, usize, usize) {
+    pub fn render(&self, width: u16, use_colors: bool) -> (Vec<String>, usize, usize) {
         let (lines, (cursor_row, cursor_col)) = self.render_with_border(width, use_colors);
         (lines, cursor_row, cursor_col)
     }
@@ -207,7 +203,11 @@ impl Editor {
     }
 
     /// Render editor with borders and return (lines, cursor_position)
-    pub fn render_with_border(&self, width: u16, use_colors: bool) -> (Vec<String>, (usize, usize)) {
+    pub fn render_with_border(
+        &self,
+        width: u16,
+        use_colors: bool,
+    ) -> (Vec<String>, (usize, usize)) {
         let mut lines = Vec::new();
 
         // Create border

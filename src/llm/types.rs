@@ -64,14 +64,14 @@ pub struct ToolResult {
 pub enum StreamChunk {
     /// Text delta (incremental text content)
     TextDelta(String),
-    
+
     /// Tool call started
     ToolCallStart {
         id: String,
         name: String,
         index: usize, // Position in the tool calls array
     },
-    
+
     /// Incremental tool call arguments (JSON delta)
     ToolCallArgsDelta {
         #[allow(dead_code)] // Kept for completeness, indexed by index field
@@ -79,7 +79,7 @@ pub enum StreamChunk {
         index: usize,
         args_json_delta: String,
     },
-    
+
     /// Tool call completed
     ToolCallComplete {
         #[allow(dead_code)] // Kept for API consistency
@@ -87,7 +87,7 @@ pub enum StreamChunk {
         #[allow(dead_code)] // Kept for API consistency
         index: usize,
     },
-    
+
     /// Response finished
     Done {
         #[allow(dead_code)] // Kept for future logging/debugging
@@ -183,7 +183,7 @@ mod tests {
 
         let msg = Message::assistant_with_tools(Some("Running ls".to_string()), vec![tool_call]);
         assert_eq!(msg.role, MessageRole::Assistant);
-        
+
         match msg.content {
             MessageContent::Mixed { text, tool_calls } => {
                 assert_eq!(text, Some("Running ls".to_string()));
@@ -204,7 +204,7 @@ mod tests {
 
         let msg = Message::tool_result(result);
         assert_eq!(msg.role, MessageRole::Tool);
-        
+
         match msg.content {
             MessageContent::ToolResult(r) => {
                 assert_eq!(r.tool_call_id, "call_123");

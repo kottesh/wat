@@ -20,7 +20,10 @@ pub enum ToolUpdate {
     Stdout(String),
     Stderr(String),
     #[allow(dead_code)] // Future use for progress bars
-    Progress { current: u64, total: u64 },
+    Progress {
+        current: u64,
+        total: u64,
+    },
 }
 
 /// Trait for executing tools

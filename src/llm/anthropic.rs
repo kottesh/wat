@@ -73,7 +73,10 @@ enum AnthropicEvent {
     #[allow(dead_code)] // Part of API response schema
     MessageStart { message: MessageInfo },
     #[serde(rename = "content_block_start")]
-    ContentBlockStart { index: usize, content_block: ContentBlock },
+    ContentBlockStart {
+        index: usize,
+        content_block: ContentBlock,
+    },
     #[serde(rename = "content_block_delta")]
     ContentBlockDelta { index: usize, delta: ContentDelta },
     #[serde(rename = "content_block_stop")]
@@ -228,17 +231,17 @@ impl StreamState {
             AnthropicEvent::MessageStart { .. } => {
                 // Message started, nothing to emit
             }
-            AnthropicEvent::ContentBlockStart { index, content_block } => match content_block {
+            AnthropicEvent::ContentBlockStart {
+                index,
+                content_block,
+            } => match content_block {
                 ContentBlock::Text { .. } => {
                     // Text block started, will get deltas next
                 }
                 ContentBlock::ToolUse { id, name } => {
-                    self.current_tool_calls.insert(index, (Some(id.clone()), Some(name.clone()), String::new()));
-                    chunks.push(StreamChunk::ToolCallStart {
-                        id,
-                        name,
-                        index,
-                    });
+                    self.current_tool_calls
+                        .insert(index, (Some(id.clone()), Some(name.clone()), String::new()));
+                    chunks.push(StreamChunk::ToolCallStart { id, name, index });
                 }
             },
             AnthropicEvent::ContentBlockDelta { index, delta } => match delta {
@@ -261,10 +264,7 @@ impl StreamState {
             AnthropicEvent::ContentBlockStop { index } => {
                 if let Some((id, _name, _args)) = self.current_tool_calls.remove(&index) {
                     if let Some(tool_id) = id {
-                        chunks.push(StreamChunk::ToolCallComplete {
-                            id: tool_id,
-                            index,
-                        });
+                        chunks.push(StreamChunk::ToolCallComplete { id: tool_id, index });
                     }
                 }
             }
@@ -276,7 +276,9 @@ impl StreamState {
                         "max_tokens" => FinishReason::Length,
                         other => FinishReason::Error(format!("Unknown stop reason: {}", other)),
                     };
-                    chunks.push(StreamChunk::Done { finish_reason: finish });
+                    chunks.push(StreamChunk::Done {
+                        finish_reason: finish,
+                    });
                 }
             }
             AnthropicEvent::MessageStop => {
@@ -344,33 +346,38 @@ impl LlmProvider for AnthropicProvider {
         }
 
         // Parse SSE stream
-        let stream = response.bytes_stream().scan(StreamState::default(), |state, item| {
-            let chunks = match item {
-                Ok(bytes) => {
-                    let text = String::from_utf8_lossy(&bytes);
-                    let mut result = Vec::new();
+        let stream = response
+            .bytes_stream()
+            .scan(StreamState::default(), |state, item| {
+                let chunks = match item {
+                    Ok(bytes) => {
+                        let text = String::from_utf8_lossy(&bytes);
+                        let mut result = Vec::new();
 
-                    for line in text.lines() {
-                        let line = line.trim();
-                        if line.is_empty() || !line.starts_with("data: ") {
-                            continue;
+                        for line in text.lines() {
+                            let line = line.trim();
+                            if line.is_empty() || !line.starts_with("data: ") {
+                                continue;
+                            }
+
+                            let data = line.trim_start_matches("data: ").trim();
+                            if let Ok(event) = serde_json::from_str::<AnthropicEvent>(data) {
+                                let event_chunks = state.process_event(event);
+                                result.extend(event_chunks);
+                            }
                         }
 
-                        let data = line.trim_start_matches("data: ").trim();
-                        if let Ok(event) = serde_json::from_str::<AnthropicEvent>(data) {
-                            let event_chunks = state.process_event(event);
-                            result.extend(event_chunks);
-                        }
+                        result
+                            .into_iter()
+                            .map(Ok)
+                            .collect::<Vec<Result<StreamChunk>>>()
                     }
+                    Err(e) => vec![Err(anyhow::anyhow!("Stream error: {}", e))],
+                };
 
-                    result.into_iter().map(Ok).collect::<Vec<Result<StreamChunk>>>()
-                }
-                Err(e) => vec![Err(anyhow::anyhow!("Stream error: {}", e))],
-            };
-
-            futures_util::future::ready(Some(futures_util::stream::iter(chunks)))
-        })
-        .flatten();
+                futures_util::future::ready(Some(futures_util::stream::iter(chunks)))
+            })
+            .flatten();
 
         Ok(Box::pin(stream))
     }
@@ -420,7 +427,7 @@ mod tests {
     #[test]
     fn test_stream_state_text_delta() {
         let mut state = StreamState::default();
-        
+
         let event = AnthropicEvent::ContentBlockDelta {
             index: 0,
             delta: ContentDelta::TextDelta {
@@ -471,7 +478,11 @@ mod tests {
         let chunks = state.process_event(delta_event);
         assert_eq!(chunks.len(), 1);
         match &chunks[0] {
-            StreamChunk::ToolCallArgsDelta { id, args_json_delta, .. } => {
+            StreamChunk::ToolCallArgsDelta {
+                id,
+                args_json_delta,
+                ..
+            } => {
                 assert_eq!(id, "toolu_123");
                 assert_eq!(args_json_delta, "{\"command\":");
             }

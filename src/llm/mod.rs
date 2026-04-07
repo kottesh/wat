@@ -1,18 +1,14 @@
 //! LLM client and provider abstractions
 
-pub mod types;
-pub mod provider;
-pub mod openai;
 pub mod anthropic;
 pub mod client;
+pub mod openai;
+pub mod provider;
+pub mod types;
 
 // Public API - only what users need
-pub use types::{
-    Message, MessageContent,
-    ToolCall, ToolResult,
-    StreamChunk, FinishReason,
-};
 pub use client::LlmClient;
+pub use types::{FinishReason, Message, MessageContent, StreamChunk, ToolCall, ToolResult};
 
 // Internal types - not exported
 // - MessageRole: internal to message construction

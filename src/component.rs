@@ -2,6 +2,7 @@
 
 use std::any::Any;
 use std::fmt;
+use unicode_width::UnicodeWidthChar;
 
 /// Unique identifier for a component
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -92,12 +93,18 @@ pub struct Modifiers {
 
 impl Modifiers {
     pub fn bold() -> Self {
-        Self { bold: true, ..Default::default() }
+        Self {
+            bold: true,
+            ..Default::default()
+        }
     }
 
     #[allow(dead_code)] // Public API for dimmed text styling
     pub fn dim() -> Self {
-        Self { dim: true, ..Default::default() }
+        Self {
+            dim: true,
+            ..Default::default()
+        }
     }
 }
 
@@ -112,7 +119,11 @@ pub struct Buffer {
 impl Buffer {
     pub fn new(width: u16, height: u16) -> Self {
         let cells = vec![vec![Cell::default(); width as usize]; height as usize];
-        Self { cells, width, height }
+        Self {
+            cells,
+            width,
+            height,
+        }
     }
 
     pub fn empty() -> Self {
@@ -124,7 +135,15 @@ impl Buffer {
     }
 
     /// Write a string at a position, wrapping at the buffer width
-    pub fn write_str(&mut self, row: u16, col: u16, s: &str, fg: Color, bg: Color, modifiers: Modifiers) -> u16 {
+    pub fn write_str(
+        &mut self,
+        row: u16,
+        col: u16,
+        s: &str,
+        fg: Color,
+        bg: Color,
+        modifiers: Modifiers,
+    ) -> u16 {
         let mut current_row = row;
         let mut current_col = col;
 
@@ -135,7 +154,9 @@ impl Buffer {
                 continue;
             }
 
-            if current_col >= self.width {
+            let ch_width = UnicodeWidthChar::width(ch).unwrap_or(1).max(1) as u16;
+
+            if current_col >= self.width || current_col + ch_width > self.width {
                 current_row += 1;
                 current_col = col;
             }
@@ -144,7 +165,9 @@ impl Buffer {
                 break;
             }
 
-            if let Some(cell) = self.cells.get_mut(current_row as usize)
+            if let Some(cell) = self
+                .cells
+                .get_mut(current_row as usize)
                 .and_then(|r| r.get_mut(current_col as usize))
             {
                 *cell = Cell {
@@ -154,7 +177,24 @@ impl Buffer {
                     modifiers,
                 };
             }
-            current_col += 1;
+
+            // Reserve the second grid column for full-width chars.
+            if ch_width == 2 {
+                if let Some(cell) = self
+                    .cells
+                    .get_mut(current_row as usize)
+                    .and_then(|r| r.get_mut((current_col + 1) as usize))
+                {
+                    *cell = Cell {
+                        char: ' ',
+                        fg,
+                        bg,
+                        modifiers,
+                    };
+                }
+            }
+
+            current_col += ch_width;
         }
 
         current_row + 1
@@ -175,14 +215,30 @@ impl Buffer {
 pub fn format_cell_style(fg: &Color, bg: &Color, mods: &Modifiers) -> String {
     let mut codes: Vec<String> = Vec::new();
 
-    if mods.bold { codes.push("1".to_string()); }
-    if mods.dim { codes.push("2".to_string()); }
-    if mods.italic { codes.push("3".to_string()); }
-    if mods.underline { codes.push("4".to_string()); }
-    if mods.blink { codes.push("5".to_string()); }
-    if mods.reverse { codes.push("7".to_string()); }
-    if mods.hidden { codes.push("8".to_string()); }
-    if mods.strikethrough { codes.push("9".to_string()); }
+    if mods.bold {
+        codes.push("1".to_string());
+    }
+    if mods.dim {
+        codes.push("2".to_string());
+    }
+    if mods.italic {
+        codes.push("3".to_string());
+    }
+    if mods.underline {
+        codes.push("4".to_string());
+    }
+    if mods.blink {
+        codes.push("5".to_string());
+    }
+    if mods.reverse {
+        codes.push("7".to_string());
+    }
+    if mods.hidden {
+        codes.push("8".to_string());
+    }
+    if mods.strikethrough {
+        codes.push("9".to_string());
+    }
 
     match fg {
         Color::Default => {}
@@ -252,5 +308,7 @@ pub trait Component: std::fmt::Debug + Send {
     fn as_any_mut(&mut self) -> &mut dyn Any;
 
     /// Toggle showing all lines (if applicable). Returns true if toggled.
-    fn toggle_show_all(&mut self) -> bool { false }
+    fn toggle_show_all(&mut self) -> bool {
+        false
+    }
 }

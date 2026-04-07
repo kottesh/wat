@@ -11,17 +11,23 @@ impl Spacing {
     pub fn new(above: u16, below: u16) -> Self {
         Self { above, below }
     }
-    
+
     pub fn none() -> Self {
         Self { above: 0, below: 0 }
     }
-    
+
     pub fn below(lines: u16) -> Self {
-        Self { above: 0, below: lines }
+        Self {
+            above: 0,
+            below: lines,
+        }
     }
-    
+
     pub fn above(lines: u16) -> Self {
-        Self { above: lines, below: 0 }
+        Self {
+            above: lines,
+            below: 0,
+        }
     }
 }
 
@@ -36,12 +42,10 @@ pub struct Layout;
 
 impl Layout {
     /// Stack component lines with spacing
-    /// 
+    ///
     /// Takes component-rendered lines and adds blank line spacing
     /// according to the spacing rules.
-    pub fn stack_with_spacing(
-        components: Vec<(Vec<String>, Spacing)>
-    ) -> Vec<String> {
+    pub fn stack_with_spacing(components: Vec<(Vec<String>, Spacing)>) -> Vec<String> {
         let mut result = Vec::new();
 
         for (i, (lines, spacing)) in components.into_iter().enumerate() {
@@ -127,16 +131,18 @@ mod tests {
 
     #[test]
     fn test_stack_with_spacing_single() {
-        let components = vec![
-            (vec!["line1".to_string(), "line2".to_string()], Spacing::default()),
-        ];
+        let components = vec![(
+            vec!["line1".to_string(), "line2".to_string()],
+            Spacing::default(),
+        )];
 
         let result = Layout::stack_with_spacing(components);
-        assert_eq!(result, vec![
-            "line1",
-            "line2",
-            "", // default below spacing
-        ]);
+        assert_eq!(
+            result,
+            vec![
+                "line1", "line2", "", // default below spacing
+            ]
+        );
     }
 
     #[test]
@@ -148,14 +154,15 @@ mod tests {
         ];
 
         let result = Layout::stack_with_spacing(components);
-        assert_eq!(result, vec![
-            "comp1",
-            "",     // below spacing for comp1
-            "comp2",
-            "",     // below spacing for comp2
-            "comp3",
-            // no below spacing for comp3
-        ]);
+        assert_eq!(
+            result,
+            vec![
+                "comp1", "", // below spacing for comp1
+                "comp2", "", // below spacing for comp2
+                "comp3",
+                // no below spacing for comp3
+            ]
+        );
     }
 
     #[test]
@@ -166,13 +173,14 @@ mod tests {
         ];
 
         let result = Layout::stack_with_spacing(components);
-        assert_eq!(result, vec![
-            "comp1",
-            "",     // above spacing for comp2 (line 1)
-            "",     // above spacing for comp2 (line 2)
-            "comp2",
-            "",     // below spacing for comp2
-        ]);
+        assert_eq!(
+            result,
+            vec![
+                "comp1", "", // above spacing for comp2 (line 1)
+                "", // above spacing for comp2 (line 2)
+                "comp2", "", // below spacing for comp2
+            ]
+        );
     }
 
     #[test]

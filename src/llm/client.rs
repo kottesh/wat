@@ -26,21 +26,15 @@ pub enum ProviderType {
 impl LlmClient {
     /// Create a new client from config
     pub fn new(config: Config) -> Result<Self> {
-        let (provider, provider_type): (Box<dyn LlmProvider>, ProviderType) = match config.api_type {
+        let (provider, provider_type): (Box<dyn LlmProvider>, ProviderType) = match config.api_type
+        {
             ApiType::OpenAiCompletions => {
-                let openai = OpenAiProvider::new(
-                    config.base_url,
-                    config.api_key,
-                    config.model_id,
-                )?;
+                let openai = OpenAiProvider::new(config.base_url, config.api_key, config.model_id)?;
                 (Box::new(openai), ProviderType::OpenAi)
             }
             ApiType::AnthropicMessages => {
-                let anthropic = AnthropicProvider::new(
-                    config.base_url,
-                    config.api_key,
-                    config.model_id,
-                )?;
+                let anthropic =
+                    AnthropicProvider::new(config.base_url, config.api_key, config.model_id)?;
                 (Box::new(anthropic), ProviderType::Anthropic)
             }
         };

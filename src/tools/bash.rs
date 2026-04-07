@@ -3,10 +3,10 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use serde_json::Value;
-use std::time::Duration;
-use tokio::process::Command;
-use tokio::io::{AsyncBufReadExt, BufReader};
 use std::process::Stdio;
+use std::time::Duration;
+use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::process::Command;
 
 use super::executor::{ExecutionResult, ToolExecutor, ToolUpdate};
 
@@ -177,7 +177,10 @@ mod tests {
 
     #[test]
     fn test_truncate_output() {
-        let long_output = (0..150).map(|i| format!("Line {}", i)).collect::<Vec<_>>().join("\n");
+        let long_output = (0..150)
+            .map(|i| format!("Line {}", i))
+            .collect::<Vec<_>>()
+            .join("\n");
         let truncated = truncate_output(&long_output, 100);
 
         assert!(truncated.contains("... (50 more lines)"));

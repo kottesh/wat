@@ -24,8 +24,11 @@ impl ToolRegistry {
         registry.register(ToolDefinition {
             name: "bash".to_string(),
             description: "Execute shell commands".to_string(),
-            parameters: ParameterSchema::new()
-                .add_string("command", "The shell command to execute", true),
+            parameters: ParameterSchema::new().add_string(
+                "command",
+                "The shell command to execute",
+                true,
+            ),
             executor: Arc::new(BashTool::new()),
         });
 
@@ -33,8 +36,7 @@ impl ToolRegistry {
         registry.register(ToolDefinition {
             name: "read_file".to_string(),
             description: "Read file contents with line numbers".to_string(),
-            parameters: ParameterSchema::new()
-                .add_string("path", "Path to the file to read", true),
+            parameters: ParameterSchema::new().add_string("path", "Path to the file to read", true),
             executor: Arc::new(ReadFileTool::new()),
         });
 

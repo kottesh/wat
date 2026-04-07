@@ -2,8 +2,8 @@
 
 use crate::component::{Component, ComponentId};
 use crate::components::{
-    BashComponent, ErrorComponent, ResponseComponent, ToolCallComponent,
-    ToolResultComponent, UserInputComponent,
+    BashComponent, ErrorComponent, ResponseComponent, ToolCallComponent, ToolResultComponent,
+    UserInputComponent,
 };
 use crate::ui::{CursorPos, DiffRenderer, Editor, FuzzySearch, Layout, Spacing};
 use std::sync::{Arc, Mutex};
@@ -18,7 +18,10 @@ struct Size {
 impl Size {
     fn current() -> Self {
         let (w, h) = crossterm::terminal::size().unwrap_or((80, 24));
-        Self { width: w, height: h }
+        Self {
+            width: w,
+            height: h,
+        }
     }
 }
 
@@ -228,7 +231,7 @@ impl UIManager {
             duration_secs,
             success,
             command,
-            self.use_colors
+            self.use_colors,
         );
         self.history.push(HistoryItem::Component(Box::new(comp)));
     }
@@ -285,7 +288,11 @@ impl UIManager {
     // ── Streaming response methods ──
 
     pub fn start_streaming_response(&mut self) {
-        self.current_response = Some(ResponseComponent::new(next_component_id(), String::new(), self.use_colors));
+        self.current_response = Some(ResponseComponent::new(
+            next_component_id(),
+            String::new(),
+            self.use_colors,
+        ));
     }
 
     pub fn push_response_chunk(&mut self, chunk: &str) {
@@ -329,16 +336,15 @@ impl UIManager {
         if self.terminal_size != old_size {
             self.force_redraw();
         }
-        
+
         self.last_terminal_size = self.terminal_size;
 
         // Trust the DiffRenderer to handle incremental updates
         // (Removed force_clear during streaming - it caused flickering)
 
         let (all_lines, cursor_pos) = self.render_all();
-        
-        // No viewport windowing - use native terminal scrollback
-        self.diff_renderer.render(all_lines, cursor_pos);
+        self.diff_renderer
+            .render(all_lines, cursor_pos, self.terminal_size.height as usize);
     }
 
     fn render_all(&self) -> (Vec<String>, CursorPos) {
@@ -367,13 +373,10 @@ impl UIManager {
         }
 
         // Render spinner if present (above input editor)
-        let spinner_lines = if let Some(ref spinner_text) = self.spinner_text {
+        if let Some(ref spinner_text) = self.spinner_text {
             let lines = vec![spinner_text.clone()];
-            components.push((lines.clone(), Spacing::none()));
-            lines.len()
-        } else {
-            0
-        };
+            components.push((lines, Spacing::none()));
+        }
 
         // Track where input block starts (before we add it)
         let input_block_start = {
@@ -387,10 +390,7 @@ impl UIManager {
             let cursor = (lines.len().saturating_sub(1), 0);
             (lines, cursor)
         } else {
-            let (lines, cursor_row, cursor_col) = self.editor.render(
-                width,
-                self.use_colors,
-            );
+            let (lines, cursor_row, cursor_col) = self.editor.render(width, self.use_colors);
             (lines, (cursor_row, cursor_col))
         };
 
@@ -403,13 +403,12 @@ impl UIManager {
         // Calculate absolute cursor position:
         // input_block_start is where input starts in the final buffer.
         // Add the cursor offset within the input block.
-        let abs_cursor_row = input_block_start + spinner_lines + input_cursor_pos.0;
+        let abs_cursor_row = input_block_start + input_cursor_pos.0;
         let abs_cursor_col = input_cursor_pos.1;
 
         (final_lines, (abs_cursor_row, abs_cursor_col))
     }
 
-    /// Apply viewport windowing to keep input box visible
     pub fn use_colors(&self) -> bool {
         self.use_colors
     }
@@ -424,7 +423,7 @@ fn component_to_lines(comp: &dyn Component, width: u16) -> Vec<String> {
 /// Convert buffer to lines (helper)
 fn buffer_to_lines(buffer: &crate::component::Buffer) -> Vec<String> {
     use crate::component::format_cell_style;
-    
+
     let mut result = Vec::new();
     for row in &buffer.cells {
         let mut line = String::new();
@@ -502,10 +501,10 @@ mod tests {
     #[test]
     fn test_input_editing() {
         let mut ui = UIManager::new(false);
-        
+
         ui.push_input_char('h');
         ui.push_input_char('i');
-        
+
         let content = ui.take_input();
         assert_eq!(content, "hi");
     }
@@ -513,10 +512,10 @@ mod tests {
     #[test]
     fn test_spinner() {
         let mut ui = UIManager::new(false);
-        
+
         ui.set_spinner("Loading...".to_string());
         assert!(ui.spinner_text.is_some());
-        
+
         ui.clear_spinner();
         assert!(ui.spinner_text.is_none());
     }
@@ -524,10 +523,10 @@ mod tests {
     #[test]
     fn test_add_components() {
         let mut ui = UIManager::new(false);
-        
+
         ui.add_user_input("test input".to_string());
         assert_eq!(ui.history.len(), 1);
-        
+
         ui.add_response("test response".to_string());
         assert_eq!(ui.history.len(), 2);
     }
@@ -535,13 +534,13 @@ mod tests {
     #[test]
     fn test_bash_lifecycle() {
         let mut ui = UIManager::new(false);
-        
+
         ui.start_bash("echo test");
         assert!(ui.current_bash.is_some());
-        
+
         ui.push_bash_output("test".to_string());
         ui.set_bash_elapsed(0.5);
-        
+
         ui.finalize_bash(0.5, true, false);
         assert!(ui.current_bash.is_none());
         assert_eq!(ui.history.len(), 1);
@@ -550,13 +549,13 @@ mod tests {
     #[test]
     fn test_streaming_response() {
         let mut ui = UIManager::new(false);
-        
+
         ui.start_streaming_response();
         assert!(ui.current_response.is_some());
-        
+
         ui.push_response_chunk("Hello ");
         ui.push_response_chunk("World");
-        
+
         ui.finalize_response();
         assert!(ui.current_response.is_none());
         assert_eq!(ui.history.len(), 1);
@@ -572,51 +571,63 @@ mod tests {
     #[test]
     fn test_cursor_position_with_spinner() {
         let mut ui = UIManager::new(false);
-        
+
         ui.add_response("Line 1".to_string());
         ui.set_spinner("Loading...".to_string());
         ui.push_input_char('h');
         ui.push_input_char('i');
-        
+
         let (lines, cursor) = ui.render_all();
-        
+
         // Cursor should be positioned at the input area
         // Not at the spinner or earlier content
         assert!(cursor.0 > 0, "Cursor row should be > 0");
-        assert!(cursor.0 < lines.len(), "Cursor should be within rendered lines");
+        assert!(
+            cursor.0 < lines.len(),
+            "Cursor should be within rendered lines"
+        );
     }
 
     #[test]
     fn test_cursor_position_multiline_input() {
         let mut ui = UIManager::new(false);
-        
+
         ui.push_input_char('a');
         ui.insert_newline();
         ui.push_input_char('b');
         ui.insert_newline();
         ui.push_input_char('c');
-        
+
         let (lines, cursor) = ui.render_all();
-        
+
         // Editor has borders + 3 lines of input
         // Should have at least 5 lines total (top border, 3 input lines, bottom border)
-        assert!(lines.len() >= 5, "Should have at least 5 lines (borders + 3-line input)");
+        assert!(
+            lines.len() >= 5,
+            "Should have at least 5 lines (borders + 3-line input)"
+        );
         // Cursor column should be after 'c' which is at position 1 ("> c|")
-        assert_eq!(cursor.1, 3, "Cursor column should be at position 3 (after '> c')");
+        assert_eq!(
+            cursor.1, 3,
+            "Cursor column should be at position 3 (after '> c')"
+        );
     }
 
     #[test]
     fn test_cursor_position_empty_history() {
         let mut ui = UIManager::new(false);
-        
+
         ui.push_input_char('x');
-        
+
         let (_lines, cursor) = ui.render_all();
-        
+
         // With only input, cursor should be after border (row 1)
         // Editor renders: top border, "> x|", bottom border
         assert!(cursor.0 >= 1, "Cursor should be after top border");
-        assert_eq!(cursor.1, 3, "Cursor column should be at position 3 (after '> x')");
+        assert_eq!(
+            cursor.1, 3,
+            "Cursor column should be at position 3 (after '> x')"
+        );
     }
 
     // ── Scroll tests ──

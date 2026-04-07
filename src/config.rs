@@ -1,8 +1,8 @@
-use std::path::PathBuf;
-use std::collections::HashMap;
-use serde::{Deserialize, Serialize};
-use anyhow::{Result, Context};
+use anyhow::{Context, Result};
 use dirs;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::path::PathBuf;
 
 /// Models configuration loaded from models.json
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -42,7 +42,10 @@ impl ApiType {
         match s {
             "openai-completions" => Ok(ApiType::OpenAiCompletions),
             "anthropic-messages" => Ok(ApiType::AnthropicMessages),
-            _ => anyhow::bail!("Unknown API type: {}. Valid options: openai-completions, anthropic-messages", s),
+            _ => anyhow::bail!(
+                "Unknown API type: {}. Valid options: openai-completions, anthropic-messages",
+                s
+            ),
         }
     }
 }
@@ -63,31 +66,55 @@ pub struct Config {
 impl Default for ModelsConfig {
     fn default() -> Self {
         let mut providers = HashMap::new();
-        
+
         // OpenAI provider
-        providers.insert("openai".to_string(), Provider {
-            base_url: "https://api.openai.com/v1".to_string(),
-            api: "openai-completions".to_string(),
-            api_key: "${OPENAI_API_KEY}".to_string(),
-            models: vec![
-                Model { id: "gpt-4".to_string(), name: "GPT-4".to_string() },
-                Model { id: "gpt-4-turbo".to_string(), name: "GPT-4 Turbo".to_string() },
-                Model { id: "gpt-3.5-turbo".to_string(), name: "GPT-3.5 Turbo".to_string() },
-            ],
-        });
-        
+        providers.insert(
+            "openai".to_string(),
+            Provider {
+                base_url: "https://api.openai.com/v1".to_string(),
+                api: "openai-completions".to_string(),
+                api_key: "${OPENAI_API_KEY}".to_string(),
+                models: vec![
+                    Model {
+                        id: "gpt-4".to_string(),
+                        name: "GPT-4".to_string(),
+                    },
+                    Model {
+                        id: "gpt-4-turbo".to_string(),
+                        name: "GPT-4 Turbo".to_string(),
+                    },
+                    Model {
+                        id: "gpt-3.5-turbo".to_string(),
+                        name: "GPT-3.5 Turbo".to_string(),
+                    },
+                ],
+            },
+        );
+
         // Anthropic provider
-        providers.insert("anthropic".to_string(), Provider {
-            base_url: "https://api.anthropic.com/v1".to_string(),
-            api: "anthropic-messages".to_string(),
-            api_key: "${ANTHROPIC_API_KEY}".to_string(),
-            models: vec![
-                Model { id: "claude-3-opus-20240229".to_string(), name: "Claude 3 Opus".to_string() },
-                Model { id: "claude-3-sonnet-20240229".to_string(), name: "Claude 3 Sonnet".to_string() },
-                Model { id: "claude-3-haiku-20240307".to_string(), name: "Claude 3 Haiku".to_string() },
-            ],
-        });
-        
+        providers.insert(
+            "anthropic".to_string(),
+            Provider {
+                base_url: "https://api.anthropic.com/v1".to_string(),
+                api: "anthropic-messages".to_string(),
+                api_key: "${ANTHROPIC_API_KEY}".to_string(),
+                models: vec![
+                    Model {
+                        id: "claude-3-opus-20240229".to_string(),
+                        name: "Claude 3 Opus".to_string(),
+                    },
+                    Model {
+                        id: "claude-3-sonnet-20240229".to_string(),
+                        name: "Claude 3 Sonnet".to_string(),
+                    },
+                    Model {
+                        id: "claude-3-haiku-20240307".to_string(),
+                        name: "Claude 3 Haiku".to_string(),
+                    },
+                ],
+            },
+        );
+
         Self {
             active_provider: "openai".to_string(),
             active_model: "gpt-4".to_string(),
@@ -100,21 +127,20 @@ impl ModelsConfig {
     /// Load configuration from models.json
     pub fn load() -> Result<Self> {
         let path = Self::config_path()?;
-        
+
         if path.exists() {
-            let json_str = std::fs::read_to_string(&path)
-                .context("Failed to read models.json")?;
-            
-            let mut config: ModelsConfig = serde_json::from_str(&json_str)
-                .context("Failed to parse models.json")?;
-            
+            let json_str = std::fs::read_to_string(&path).context("Failed to read models.json")?;
+
+            let mut config: ModelsConfig =
+                serde_json::from_str(&json_str).context("Failed to parse models.json")?;
+
             // Expand environment variables in all API keys
             for provider in config.providers.values_mut() {
                 provider.api_key = shellexpand::env(&provider.api_key)
                     .unwrap_or(std::borrow::Cow::Borrowed(&provider.api_key))
                     .to_string();
             }
-            
+
             Ok(config)
         } else {
             // Create default config
@@ -124,40 +150,48 @@ impl ModelsConfig {
             Ok(config)
         }
     }
-    
+
     /// Save configuration to models.json
     pub fn save(&self) -> Result<()> {
         let path = Self::config_path()?;
-        
+
         // Create config directory if it doesn't exist
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .context("Failed to create config directory")?;
+            std::fs::create_dir_all(parent).context("Failed to create config directory")?;
         }
-        
-        let json_str = serde_json::to_string_pretty(self)
-            .context("Failed to serialize config")?;
-        
-        std::fs::write(&path, json_str)
-            .context("Failed to write models.json")?;
-        
+
+        let json_str = serde_json::to_string_pretty(self).context("Failed to serialize config")?;
+
+        std::fs::write(&path, json_str).context("Failed to write models.json")?;
+
         Ok(())
     }
-    
+
     /// Convert to runtime Config
     pub fn to_config(&self) -> Result<Config> {
         // Get the active provider
-        let provider = self.providers.get(&self.active_provider)
-            .with_context(|| format!("Active provider '{}' not found in configuration", self.active_provider))?;
-        
+        let provider = self.providers.get(&self.active_provider).with_context(|| {
+            format!(
+                "Active provider '{}' not found in configuration",
+                self.active_provider
+            )
+        })?;
+
         // Find the active model
-        let model = provider.models.iter()
+        let model = provider
+            .models
+            .iter()
             .find(|m| m.id == self.active_model)
-            .with_context(|| format!("Active model '{}' not found in provider '{}'", self.active_model, self.active_provider))?;
-        
+            .with_context(|| {
+                format!(
+                    "Active model '{}' not found in provider '{}'",
+                    self.active_model, self.active_provider
+                )
+            })?;
+
         // Parse API type
         let api_type = ApiType::from_str(&provider.api)?;
-        
+
         Ok(Config {
             provider_name: self.active_provider.clone(),
             model_id: model.id.clone(),
@@ -167,27 +201,27 @@ impl ModelsConfig {
             api_key: provider.api_key.clone(),
         })
     }
-    
+
     /// Get config directory path
     pub fn config_dir() -> Result<PathBuf> {
         let dir = dirs::config_dir()
             .context("Failed to get config directory")?
             .join("wat");
-        
+
         Ok(dir)
     }
-    
+
     /// Get config file path
     pub fn config_path() -> Result<PathBuf> {
         Ok(Self::config_dir()?.join("models.json"))
     }
-    
+
     /// List all provider names
     #[allow(dead_code)] // Public API for /model command
     pub fn list_providers(&self) -> Vec<String> {
         self.providers.keys().cloned().collect()
     }
-    
+
     /// List models for a specific provider
     #[allow(dead_code)] // Public API for /model command
     pub fn list_models(&self, provider: &str) -> Option<&Vec<Model>> {
@@ -243,7 +277,7 @@ mod tests {
 
         let models_config: ModelsConfig = serde_json::from_str(json).unwrap();
         let config = models_config.to_config().unwrap();
-        
+
         assert_eq!(config.provider_name, "test");
         assert_eq!(config.model_id, "test-model-1");
         assert_eq!(config.model_name, "Test Model 1");

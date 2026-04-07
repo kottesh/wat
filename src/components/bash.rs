@@ -2,6 +2,7 @@
 
 use crate::component::{Buffer, Cell, Color, Component, ComponentId, Modifiers};
 use std::any::Any;
+use unicode_width::UnicodeWidthChar;
 
 /// Status of bash command execution
 #[derive(Debug, Clone, PartialEq)]
@@ -26,11 +27,7 @@ pub struct BashComponent {
 
 impl BashComponent {
     /// Create a new bash component
-    pub fn new(
-        id: ComponentId,
-        command: String,
-        use_colors: bool,
-    ) -> Self {
+    pub fn new(id: ComponentId, command: String, use_colors: bool) -> Self {
         Self {
             id,
             command,
@@ -107,11 +104,11 @@ impl BashComponent {
         let wrap_text = |text: &str| -> Vec<String> {
             let mut result = Vec::new();
             let mut current_line = String::new();
-            let mut current_width = 0;
+            let mut current_width = 0usize;
 
             for c in text.chars() {
-                let cw = 1; // Simplification
-                if current_width + cw > width {
+                let cw = UnicodeWidthChar::width(c).unwrap_or(1).max(1);
+                if current_width + cw > width && !current_line.is_empty() {
                     result.push(current_line);
                     current_line = String::new();
                     current_width = 0;
@@ -141,7 +138,9 @@ impl BashComponent {
 
         // output lines
         for l in &display_lines {
-            let content = format!("  {}", l);
+            // Strip ANSI from tool output so nested resets don't break background blocks.
+            let plain = strip_ansi(l);
+            let content = format!("  {}", plain);
             let wrapped_content = wrap_text(&content);
             for wc in wrapped_content {
                 lines.push(format!("{}{}{}{}", bg, wc, pad(&wc), reset));
@@ -174,9 +173,9 @@ impl Component for BashComponent {
         // This maintains compatibility with the current rendering system
         let lines = self.render_lines(width as usize);
         let height = lines.len() as u16;
-        
+
         let mut buffer = Buffer::new(width, height);
-        
+
         for (row, line) in lines.iter().enumerate() {
             let mut col = 0;
             for ch in line.chars() {
@@ -186,7 +185,7 @@ impl Component for BashComponent {
                 if row >= height as usize {
                     break;
                 }
-                
+
                 buffer.cells[row][col] = Cell {
                     char: ch,
                     fg: Color::Default,
@@ -196,7 +195,7 @@ impl Component for BashComponent {
                 col += 1;
             }
         }
-        
+
         buffer
     }
 
@@ -219,23 +218,49 @@ impl Component for BashComponent {
 }
 
 /// Calculate visible width of a string (stripping ANSI escape codes)
-fn visible_width(s: &str) -> usize {
-    let mut width = 0;
-    let mut in_esc = false;
-    for c in s.chars() {
-        if c == '\x1b' {
-            in_esc = true;
+fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+
+    while let Some(c) = chars.next() {
+        if c != '\x1b' {
+            out.push(c);
             continue;
         }
-        if in_esc {
-            if c.is_ascii_alphabetic() {
-                in_esc = false;
+
+        match chars.peek().copied() {
+            Some('[') => {
+                chars.next();
+                for ch in chars.by_ref() {
+                    if ('@'..='~').contains(&ch) {
+                        break;
+                    }
+                }
             }
-            continue;
+            Some(']') => {
+                chars.next();
+                let mut prev = '\0';
+                for ch in chars.by_ref() {
+                    if ch == '\x07' || (prev == '\x1b' && ch == '\\') {
+                        break;
+                    }
+                    prev = ch;
+                }
+            }
+            _ => {
+                let _ = chars.next();
+            }
         }
-        width += 1;
     }
-    width
+
+    out
+}
+
+fn visible_width(s: &str) -> usize {
+    strip_ansi(s)
+        .chars()
+        .map(|c| UnicodeWidthChar::width(c).unwrap_or(1).max(1))
+        .sum()
 }
 
 #[cfg(test)]
@@ -244,12 +269,8 @@ mod tests {
 
     #[test]
     fn test_new_bash_component() {
-        let comp = BashComponent::new(
-            ComponentId(1),
-            "echo test".to_string(),
-            true,
-        );
-        
+        let comp = BashComponent::new(ComponentId(1), "echo test".to_string(), true);
+
         assert_eq!(comp.command, "echo test");
         assert_eq!(comp.output_lines.len(), 0);
         assert_eq!(comp.elapsed_secs, 0.0);
@@ -259,15 +280,11 @@ mod tests {
 
     #[test]
     fn test_push_output() {
-        let mut comp = BashComponent::new(
-            ComponentId(1),
-            "ls".to_string(),
-            false,
-        );
-        
+        let mut comp = BashComponent::new(ComponentId(1), "ls".to_string(), false);
+
         comp.push_output("file1.txt".to_string());
         comp.push_output("file2.txt".to_string());
-        
+
         assert_eq!(comp.output_lines.len(), 2);
         assert_eq!(comp.output_lines[0], "file1.txt");
         assert_eq!(comp.output_lines[1], "file2.txt");
@@ -275,40 +292,28 @@ mod tests {
 
     #[test]
     fn test_set_elapsed() {
-        let mut comp = BashComponent::new(
-            ComponentId(1),
-            "sleep 1".to_string(),
-            false,
-        );
-        
+        let mut comp = BashComponent::new(ComponentId(1), "sleep 1".to_string(), false);
+
         comp.set_elapsed(1.5);
         assert_eq!(comp.elapsed_secs, 1.5);
     }
 
     #[test]
     fn test_set_done() {
-        let mut comp = BashComponent::new(
-            ComponentId(1),
-            "true".to_string(),
-            false,
-        );
-        
+        let mut comp = BashComponent::new(ComponentId(1), "true".to_string(), false);
+
         comp.set_done(true);
         assert_eq!(comp.status, BashStatus::Done { success: true });
         assert!(!comp.is_streaming());
-        
+
         comp.set_done(false);
         assert_eq!(comp.status, BashStatus::Done { success: false });
     }
 
     #[test]
     fn test_set_cancelled() {
-        let mut comp = BashComponent::new(
-            ComponentId(1),
-            "sleep 100".to_string(),
-            false,
-        );
-        
+        let mut comp = BashComponent::new(ComponentId(1), "sleep 100".to_string(), false);
+
         comp.set_cancelled();
         assert_eq!(comp.status, BashStatus::Cancelled);
         assert!(!comp.is_streaming());
@@ -316,18 +321,14 @@ mod tests {
 
     #[test]
     fn test_render_lines_no_color() {
-        let mut comp = BashComponent::new(
-            ComponentId(1),
-            "echo hello".to_string(),
-            false,
-        );
-        
+        let mut comp = BashComponent::new(ComponentId(1), "echo hello".to_string(), false);
+
         comp.push_output("hello".to_string());
         comp.set_elapsed(0.1);
         comp.set_done(true);
-        
+
         let lines = comp.render_lines(80);
-        
+
         assert_eq!(lines[0], "  $ echo hello");
         assert_eq!(lines[1], "  hello");
         assert_eq!(lines[2], "  Took 0.1s");
@@ -335,12 +336,8 @@ mod tests {
 
     #[test]
     fn test_toggle_show_all() {
-        let mut comp = BashComponent::new(
-            ComponentId(1),
-            "test".to_string(),
-            false,
-        );
-        
+        let mut comp = BashComponent::new(ComponentId(1), "test".to_string(), false);
+
         assert!(!comp.show_all);
         comp.toggle_show_all();
         assert!(comp.show_all);
@@ -357,15 +354,11 @@ mod tests {
 
     #[test]
     fn test_render_component() {
-        let mut comp = BashComponent::new(
-            ComponentId(1),
-            "test".to_string(),
-            false,
-        );
-        
+        let mut comp = BashComponent::new(ComponentId(1), "test".to_string(), false);
+
         comp.push_output("output".to_string());
         comp.set_done(true);
-        
+
         let buffer = comp.render(80);
         assert_eq!(buffer.width, 80);
         assert!(buffer.height > 0);
@@ -373,14 +366,10 @@ mod tests {
 
     #[test]
     fn test_preferred_height() {
-        let mut comp = BashComponent::new(
-            ComponentId(1),
-            "test".to_string(),
-            false,
-        );
-        
+        let mut comp = BashComponent::new(ComponentId(1), "test".to_string(), false);
+
         comp.push_output("line1".to_string());
-        
+
         let height = comp.preferred_height(80);
         assert!(height > 0);
     }

@@ -80,7 +80,9 @@ impl ToolResultComponent {
 
         let wrap_count = |text_len: usize, prefix: usize| -> u16 {
             let total_len = text_len + prefix;
-            if total_len == 0 { return 1; }
+            if total_len == 0 {
+                return 1;
+            }
             std::cmp::max(1, (total_len as u16 + width - 1) / width)
         };
 
@@ -172,7 +174,9 @@ impl Component for ToolResultComponent {
                 let text_len = cmd_text.chars().count() as u16;
                 let rows = std::cmp::max(1, (text_len + width - 1) / width);
                 for r in current_row..current_row + rows {
-                    if r < height { buffer.fill_row(r, bg_color); }
+                    if r < height {
+                        buffer.fill_row(r, bg_color);
+                    }
                 }
                 buffer.write_str(
                     current_row,
@@ -198,7 +202,9 @@ impl Component for ToolResultComponent {
                 let text_len = std::cmp::max(1, text.chars().count());
                 let rows = std::cmp::max(1, (text_len as u16 + width - 1) / width);
                 for r in current_row..current_row + rows {
-                    if r < height { buffer.fill_row(r, bg_color); }
+                    if r < height {
+                        buffer.fill_row(r, bg_color);
+                    }
                 }
                 current_row = buffer.write_str(
                     current_row,
@@ -216,7 +222,9 @@ impl Component for ToolResultComponent {
                 let text_len = std::cmp::max(1, timing_text.chars().count());
                 let rows = std::cmp::max(1, (text_len as u16 + width - 1) / width);
                 for r in current_row..current_row + rows {
-                    if r < height { buffer.fill_row(r, bg_color); }
+                    if r < height {
+                        buffer.fill_row(r, bg_color);
+                    }
                 }
                 current_row = buffer.write_str(
                     current_row,
@@ -245,7 +253,9 @@ impl Component for ToolResultComponent {
                 let text_len = std::cmp::max(1, text.chars().count());
                 let rows = std::cmp::max(1, (text_len as u16 + width - 1) / width);
                 for r in current_row..current_row + rows {
-                    if r < height { buffer.fill_row(r, bg_color); }
+                    if r < height {
+                        buffer.fill_row(r, bg_color);
+                    }
                 }
                 current_row = buffer.write_str(
                     current_row,
@@ -259,7 +269,9 @@ impl Component for ToolResultComponent {
 
             // Padding above timing
             if self.state.duration_secs.is_some() {
-                if current_row < height { buffer.fill_row(current_row, bg_color); }
+                if current_row < height {
+                    buffer.fill_row(current_row, bg_color);
+                }
                 current_row += 1;
             }
 
@@ -269,7 +281,9 @@ impl Component for ToolResultComponent {
                 let text_len = std::cmp::max(1, timing_text.chars().count());
                 let rows = std::cmp::max(1, (text_len as u16 + width - 1) / width);
                 for r in current_row..current_row + rows {
-                    if r < height { buffer.fill_row(r, bg_color); }
+                    if r < height {
+                        buffer.fill_row(r, bg_color);
+                    }
                 }
                 current_row = buffer.write_str(
                     current_row,
@@ -294,7 +308,8 @@ impl Component for ToolResultComponent {
             };
 
             for line in &display_lines {
-                current_row = buffer.write_str(current_row, 0, line, fg, bg_color, Modifiers::default());
+                current_row =
+                    buffer.write_str(current_row, 0, line, fg, bg_color, Modifiers::default());
             }
 
             // Timing
@@ -314,7 +329,9 @@ impl Component for ToolResultComponent {
             }
 
             // Bottom padding
-            if current_row < height { buffer.fill_row(current_row, bg_color); }
+            if current_row < height {
+                buffer.fill_row(current_row, bg_color);
+            }
         }
 
         buffer

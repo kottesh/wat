@@ -1,18 +1,21 @@
 //! Main agent — conversation loop with native tool calling
 
-use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}};
-use std::time::Duration;
 use futures_util::StreamExt;
 use serde_json::Value;
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
+};
+use std::time::Duration;
 
 use anyhow::Result;
 
 use crate::{
     config::Config,
     llm::{LlmClient, Message, StreamChunk, ToolCall, ToolResult},
-    ui::SharedRenderer,
     terminal::{InputEvent, TerminalState},
     tools::{ToolRegistry, ToolUpdate},
+    ui::SharedRenderer,
 };
 
 pub struct Agent {
@@ -33,14 +36,12 @@ struct InProgressToolCall {
 impl Agent {
     pub fn new(config: Config) -> Result<Self> {
         let terminal = TerminalState::new()?;
-        let renderer = Arc::new(Mutex::new(
-            crate::ui::UIManager::new(true)
-        ));
+        let renderer = Arc::new(Mutex::new(crate::ui::UIManager::new(true)));
         let llm_client = LlmClient::new(config)?;
-        Ok(Self { 
-            terminal, 
-            renderer, 
-            llm_client, 
+        Ok(Self {
+            terminal,
+            renderer,
+            llm_client,
             history: Vec::new(),
             registry: ToolRegistry::new(),
         })
@@ -54,7 +55,10 @@ impl Agent {
         result
     }
 
-    async fn main_loop(&mut self, input_rx: &mut tokio::sync::mpsc::Receiver<InputEvent>) -> Result<()> {
+    async fn main_loop(
+        &mut self,
+        input_rx: &mut tokio::sync::mpsc::Receiver<InputEvent>,
+    ) -> Result<()> {
         // Render initial state without clearing screen
         {
             let mut r = self.renderer.lock().unwrap();
@@ -112,7 +116,9 @@ impl Agent {
             messages.extend(self.history.clone());
 
             // Get tool definitions
-            let tools: Vec<_> = self.registry.get_all_definitions()
+            let tools: Vec<_> = self
+                .registry
+                .get_all_definitions()
                 .into_iter()
                 .map(|t| t.clone())
                 .collect();
@@ -120,10 +126,14 @@ impl Agent {
             // Start background spinner
             let spinner_active = Arc::new(AtomicBool::new(true));
             let spinner_label = Arc::new(Mutex::new("Thinking...".to_string()));
-            let spinner_handle = self.spawn_spinner_task(spinner_active.clone(), spinner_label.clone());
+            let spinner_handle =
+                self.spawn_spinner_task(spinner_active.clone(), spinner_label.clone());
 
             // Stream LLM response
-            let mut stream = self.llm_client.stream_default(messages, Some(&tools)).await?;
+            let mut stream = self
+                .llm_client
+                .stream_default(messages, Some(&tools))
+                .await?;
 
             {
                 let mut r = self.renderer.lock().unwrap();
@@ -132,7 +142,8 @@ impl Agent {
 
             // Accumulate response
             let mut text_content = String::new();
-            let mut tool_calls_map: std::collections::HashMap<usize, InProgressToolCall> = std::collections::HashMap::new();
+            let mut tool_calls_map: std::collections::HashMap<usize, InProgressToolCall> =
+                std::collections::HashMap::new();
             let mut first_chunk = true;
 
             let aborted = loop {
@@ -225,7 +236,11 @@ impl Agent {
 
             // Add assistant message with tool calls
             self.history.push(Message::assistant_with_tools(
-                if text_content.is_empty() { None } else { Some(text_content) },
+                if text_content.is_empty() {
+                    None
+                } else {
+                    Some(text_content)
+                },
                 tool_calls.clone(),
             ));
 
@@ -244,7 +259,8 @@ impl Agent {
         call: &ToolCall,
         input_rx: &mut tokio::sync::mpsc::Receiver<InputEvent>,
     ) -> Result<ToolResult> {
-        let tool_def = self.registry
+        let tool_def = self
+            .registry
             .get(&call.name)
             .ok_or_else(|| anyhow::anyhow!("Unknown tool: {}", call.name))?;
 
@@ -278,13 +294,17 @@ impl Agent {
         });
 
         // Execute with timeout
-        let timeout_duration = tool_def.executor.timeout().unwrap_or(Duration::from_secs(30));
-        
+        let timeout_duration = tool_def
+            .executor
+            .timeout()
+            .unwrap_or(Duration::from_secs(30));
+
         let active = Arc::new(AtomicBool::new(true));
         let start = std::time::Instant::now();
         let timer_handle = self.spawn_bash_timer_task(active.clone(), start);
 
-        let mut exec_future = Box::pin(tool_def.executor.execute(call.arguments.clone(), on_update));
+        let mut exec_future =
+            Box::pin(tool_def.executor.execute(call.arguments.clone(), on_update));
         let mut cancelled = false;
 
         let exec_result = loop {
@@ -317,16 +337,18 @@ impl Agent {
 
         let execution_result = match exec_result {
             Some(Ok(result)) => result,
-            Some(Err(e)) => {
-                crate::tools::ExecutionResult {
-                    content: format!("Tool execution failed: {}", e),
-                    success: false,
-                    error: Some(e.to_string()),
-                    duration: start.elapsed(),
-                }
-            }
+            Some(Err(e)) => crate::tools::ExecutionResult {
+                content: format!("Tool execution failed: {}", e),
+                success: false,
+                error: Some(e.to_string()),
+                duration: start.elapsed(),
+            },
             None => {
-                let reason = if cancelled { "Cancelled by user" } else { "Timeout" };
+                let reason = if cancelled {
+                    "Cancelled by user"
+                } else {
+                    "Timeout"
+                };
                 crate::tools::ExecutionResult {
                     content: reason.to_string(),
                     success: false,
@@ -366,7 +388,11 @@ impl Agent {
         })
     }
 
-    fn spawn_spinner_task(&self, active: Arc<AtomicBool>, label: Arc<Mutex<String>>) -> tokio::task::JoinHandle<()> {
+    fn spawn_spinner_task(
+        &self,
+        active: Arc<AtomicBool>,
+        label: Arc<Mutex<String>>,
+    ) -> tokio::task::JoinHandle<()> {
         let renderer = self.renderer.clone();
         tokio::spawn(async move {
             let frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -374,7 +400,9 @@ impl Agent {
             while active.load(Ordering::Relaxed) {
                 {
                     let mut r = renderer.lock().unwrap();
-                    if !active.load(Ordering::Relaxed) { break; }
+                    if !active.load(Ordering::Relaxed) {
+                        break;
+                    }
                     let frame = frames[idx];
                     let current_label = label.lock().unwrap().clone();
                     let text = if r.use_colors() {
@@ -391,7 +419,11 @@ impl Agent {
         })
     }
 
-    fn spawn_bash_timer_task(&self, active: Arc<AtomicBool>, start: std::time::Instant) -> tokio::task::JoinHandle<()> {
+    fn spawn_bash_timer_task(
+        &self,
+        active: Arc<AtomicBool>,
+        start: std::time::Instant,
+    ) -> tokio::task::JoinHandle<()> {
         let renderer = self.renderer.clone();
         tokio::spawn(async move {
             while active.load(Ordering::Relaxed) {

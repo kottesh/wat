@@ -1,13 +1,13 @@
 //! UI module - component-driven rendering system
 
-pub mod fuzzy;
-pub mod editor;
 pub mod diff;
+pub mod editor;
+pub mod fuzzy;
 pub mod layout;
 pub mod manager;
 
-pub use fuzzy::{FuzzyMatcher, FuzzySearch};
+pub use diff::{CursorPos, DiffRenderer};
 pub use editor::Editor;
-pub use diff::{DiffRenderer, CursorPos};
+pub use fuzzy::{FuzzyMatcher, FuzzySearch};
 pub use layout::{Layout, Spacing};
-pub use manager::{UIManager, SharedRenderer, next_component_id};
+pub use manager::{SharedRenderer, UIManager, next_component_id};

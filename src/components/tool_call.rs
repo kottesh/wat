@@ -20,7 +20,11 @@ impl ToolCallComponent {
     /// Create a new tool call component
     pub fn new(_id: ComponentId, tool_name: String, args: String, use_colors: bool) -> Self {
         Self {
-            state: ToolCallState { tool_name, args, use_colors },
+            state: ToolCallState {
+                tool_name,
+                args,
+                use_colors,
+            },
         }
     }
 
@@ -58,7 +62,14 @@ impl Component for ToolCallComponent {
         buffer.fill_row(1, bg_color);
         buffer.write_str(1, 0, "  ", Color::Default, bg_color, Modifiers::default());
         buffer.write_str(1, 2, "Read", Color::Default, bg_color, Modifiers::bold());
-        buffer.write_str(1, 7, &self.state.args, Color::Default, bg_color, Modifiers::default());
+        buffer.write_str(
+            1,
+            7,
+            &self.state.args,
+            Color::Default,
+            bg_color,
+            Modifiers::default(),
+        );
 
         buffer
     }

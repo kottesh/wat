@@ -19,7 +19,10 @@ impl ErrorComponent {
     /// Create a new error component
     pub fn new(_id: ComponentId, message: String, use_colors: bool) -> Self {
         Self {
-            state: ErrorState { message, use_colors },
+            state: ErrorState {
+                message,
+                use_colors,
+            },
         }
     }
 }
@@ -44,11 +47,32 @@ impl Component for ErrorComponent {
         for (idx, line) in lines.iter().enumerate() {
             if idx == 0 {
                 // First line: "error: <message>"
-                buffer.write_str(idx as u16, 0, "error: ", fg, Color::Default, Modifiers::bold());
-                buffer.write_str(idx as u16, 7, line, fg, Color::Default, Modifiers::default());
+                buffer.write_str(
+                    idx as u16,
+                    0,
+                    "error: ",
+                    fg,
+                    Color::Default,
+                    Modifiers::bold(),
+                );
+                buffer.write_str(
+                    idx as u16,
+                    7,
+                    line,
+                    fg,
+                    Color::Default,
+                    Modifiers::default(),
+                );
             } else {
                 // Subsequent lines
-                buffer.write_str(idx as u16, 0, line, fg, Color::Default, Modifiers::default());
+                buffer.write_str(
+                    idx as u16,
+                    0,
+                    line,
+                    fg,
+                    Color::Default,
+                    Modifiers::default(),
+                );
             }
         }
 

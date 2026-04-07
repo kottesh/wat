@@ -22,7 +22,10 @@ impl ResponseComponent {
     /// Create a new response component
     pub fn new(_id: ComponentId, content: String, use_colors: bool) -> Self {
         Self {
-            state: ResponseState { content, use_colors },
+            state: ResponseState {
+                content,
+                use_colors,
+            },
             cached_lines: RefCell::new(None),
         }
     }
@@ -114,7 +117,11 @@ impl ResponseComponent {
     /// Wrap a line to fit within the given width
     fn wrap_line(&self, line: &str, max_width: usize) -> Vec<String> {
         if line.len() <= max_width {
-            return if line.is_empty() { vec![String::new()] } else { vec![line.to_string()] };
+            return if line.is_empty() {
+                vec![String::new()]
+            } else {
+                vec![line.to_string()]
+            };
         }
 
         let mut wrapped = Vec::new();

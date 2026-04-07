@@ -8,7 +8,7 @@ pub struct FuzzyMatcher;
 
 impl FuzzyMatcher {
     /// Match query against text, return score (0 = no match, higher = better)
-    /// 
+    ///
     /// Scoring strategy:
     /// - Exact substring match: 100 - position
     /// - Start of string bonus: +50
@@ -107,11 +107,11 @@ impl FuzzyMatcher {
 
 /// Fuzzy file search state
 pub struct FuzzySearch {
-    files: Vec<String>,       // Cached file list
-    results: Vec<String>,     // Current filtered results
-    selection: usize,         // Selected index
-    query: String,            // Current search query
-    max_results: usize,       // Maximum results to show
+    files: Vec<String>,   // Cached file list
+    results: Vec<String>, // Current filtered results
+    selection: usize,     // Selected index
+    query: String,        // Current search query
+    max_results: usize,   // Maximum results to show
 }
 
 impl FuzzySearch {
@@ -169,10 +169,7 @@ impl FuzzySearch {
                 } else if entry_path.is_file() {
                     if let Some(path_str) = entry_path.to_str() {
                         // Strip "./" prefix for cleaner display
-                        let clean = path_str
-                            .strip_prefix("./")
-                            .unwrap_or(path_str)
-                            .to_string();
+                        let clean = path_str.strip_prefix("./").unwrap_or(path_str).to_string();
                         files.push(clean);
                     }
 
@@ -295,11 +292,11 @@ impl FuzzySearch {
     /// Render fuzzy search results
     pub fn render(&self, _width: u16) -> Vec<String> {
         let mut lines = Vec::new();
-        
+
         // Header
         lines.push(format!("Fuzzy Search ({}  results):", self.results.len()));
         lines.push(String::new());
-        
+
         // Results
         for (i, file) in self.results.iter().enumerate() {
             if i == self.selection {
@@ -308,11 +305,11 @@ impl FuzzySearch {
                 lines.push(format!("  {}", file));
             }
         }
-        
+
         if self.results.is_empty() {
             lines.push("  No matches".to_string());
         }
-        
+
         lines
     }
 }

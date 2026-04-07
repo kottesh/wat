@@ -150,12 +150,11 @@ mod tests {
 
     #[test]
     fn test_schema_to_openai() {
-        let schema = ParameterSchema::new()
-            .add_string("path", "File path", true);
+        let schema = ParameterSchema::new().add_string("path", "File path", true);
 
         let openai_schema = schema.to_openai();
         assert!(openai_schema.is_object());
-        
+
         let obj = openai_schema.as_object().unwrap();
         assert_eq!(obj.get("type").unwrap().as_str().unwrap(), "object");
         assert!(obj.contains_key("properties"));
@@ -164,12 +163,11 @@ mod tests {
 
     #[test]
     fn test_schema_to_anthropic() {
-        let schema = ParameterSchema::new()
-            .add_string("query", "Search query", true);
+        let schema = ParameterSchema::new().add_string("query", "Search query", true);
 
         let anthropic_schema = schema.to_anthropic();
         assert!(anthropic_schema.is_object());
-        
+
         // Anthropic and OpenAI use the same JSON Schema format
         let obj = anthropic_schema.as_object().unwrap();
         assert_eq!(obj.get("type").unwrap().as_str().unwrap(), "object");
